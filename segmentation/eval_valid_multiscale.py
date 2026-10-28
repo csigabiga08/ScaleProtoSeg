@@ -16,6 +16,7 @@ from torch.nn import functional as F
 from torchvision import transforms
 from tqdm import tqdm
 
+from segmentation.checkpoints import load_model_checkpoint
 from segmentation.constants import (
     CITYSCAPES_19_EVAL_CATEGORIES,
     CITYSCAPES_CATEGORIES,
@@ -61,7 +62,7 @@ def run_evaluation(
         checkpoint_path = os.path.join(model_path, f"checkpoints/{training_phase}_last.pth")
 
     log(f"Loading model from {checkpoint_path}")
-    ppnet = torch.load(checkpoint_path)
+    ppnet = load_model_checkpoint(checkpoint_path)
     ppnet = ppnet.cuda()
     ppnet.eval()
 

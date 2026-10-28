@@ -5,6 +5,7 @@ import os
 import argh
 import torch
 
+from segmentation.checkpoints import load_model_checkpoint
 from settings import log
 
 
@@ -22,7 +23,7 @@ def threshold_save(model_name: str, training_phase: str, threshold: float):
         checkpoint_path = os.path.join(model_path, f"checkpoints/{training_phase}_last.pth")
 
     log(f"Loading model from {checkpoint_path}")
-    ppnet = torch.load(checkpoint_path)
+    ppnet = load_model_checkpoint(checkpoint_path)
 
     for i in range(len(ppnet.group_projection)):
         ppnet.group_projection[i].weight.data[ppnet.group_projection[i].weight.data < threshold] = 0
