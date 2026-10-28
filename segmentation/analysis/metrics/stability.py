@@ -246,9 +246,11 @@ def part_intersect(
                 upsampled_act_img_j = cv2.resize(
                     proto_act_img_j, dsize=(original_img_width, original_img_height), interpolation=cv2.INTER_NEAREST
                 )
-                upsampled_act_img_j = upsampled_act_img_j * y_mask
-                upsampled_act_img_j = upsampled_act_img_j[None, :, :]
-                upsampled_act_img_j = quantile_map(torch.tensor(upsampled_act_img_j), quantile).numpy()
+                upsampled_act_img_j = quantile_map(
+                    torch.from_numpy(upsampled_act_img_j[None, :, :]),
+                    quantile,
+                    class_mask=torch.from_numpy(y_mask),
+                ).numpy()
 
                 for part_id, centroids in part_centroids.items():
                     for centroid in centroids:

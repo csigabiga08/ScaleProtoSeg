@@ -1,6 +1,5 @@
 """Script to evaluate models for consistency"""
 
-import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -113,12 +112,6 @@ def run_consistency(
     else:
         proto_ids = None
 
-    try:
-        with open(os.path.join(output_path, "quantiles.json"), "r") as f:
-            quantiles = json.load(f)
-    except FileNotFoundError:
-        quantiles = None
-
     val_dataset = PatchClassificationDataset(  # TODO: Adapt to new dataset
         data_type=data_type,
         mean=[0.485, 0.456, 0.406],
@@ -156,7 +149,8 @@ def run_consistency(
             img = Image.open(f).convert("RGB")
 
         _, part_presence_list = part_intersect(
-            img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile, proto_ids, FILTER_CLASS, quantiles
+            img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile, proto_ids, FILTER_CLASS,
+            exclude_background_centroid=exclude_background_centroid,
         )
 
         tot_presence.extend(part_presence_list)
@@ -193,7 +187,8 @@ def part_intersect(
     quantile: float,
     filter_proto_ids: Optional[List[int]] = None,
     filter_class_ids: List[int] = [],
-    quantiles: Optional[List[float]] = None,
+    *,
+    exclude_background_centroid: bool = False,
 ) -> Tuple[Dict[int, List[int]], List[List[Any]]]:
     """Compute intersection between part labels and prototype activations."""
 
@@ -246,18 +241,11 @@ def part_intersect(
                 upsampled_act_img_j = cv2.resize(
                     proto_act_img_j, dsize=(original_img_width, original_img_height), interpolation=cv2.INTER_NEAREST
                 )
-                upsampled_act_img_j = upsampled_act_img_j * y_mask
-
-                quantiles = None
-
-                if quantiles is None:
-                    upsampled_act_img_j = upsampled_act_img_j[None, :, :]
-                    upsampled_act_img_j = quantile_map(torch.tensor(upsampled_act_img_j), quantile).numpy().astype(int)
-
-                else:
-                    quantile_value = quantiles[str(p.item())][str(quantile)]
-                    upsampled_act_img_j = (upsampled_act_img_j > quantile_value).astype(int)
-                    upsampled_act_img_j = upsampled_act_img_j[:, :, None]
+                upsampled_act_img_j = quantile_map(
+                    torch.from_numpy(upsampled_act_img_j[None, :, :]),
+                    quantile,
+                    class_mask=torch.from_numpy(y_mask),
+                ).numpy().astype(int)
 
                 for part_id, centroids in part_centroids.items():
                     presence_list[part_id] = 0
