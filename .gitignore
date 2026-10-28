@@ -194,3 +194,5 @@ hp-*.ipynb
 
 # RCP Set-up
 /rcp
+
+data/
