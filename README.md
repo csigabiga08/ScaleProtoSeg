@@ -22,11 +22,41 @@ Install python libraries and local code:
 pip install -r requirements/requirements.txt
 ```
 
+The PyPI release `panoptic-parts 2.0rc6` incorrectly interprets Python 3.10 and
+newer as Python 3.1 and raises `At least Python 3.7 is needed`. Repair its version
+check using the Python interpreter from the environment you installed into:
+
+```bash
+python scripts/fix_panoptic_parts.py
+python -c "import panoptic_parts"
+```
+
+The script backs up the original file in the environment's `compat-backups`
+directory and can be run again safely. Repeat it after reinstalling this package.
+
 For using Deeplab it might be necessary to run:
 
 ```
 pip install git+https://github.com/lucasb-eyer/pydensecrf.git --no-build-isolation
 ```
+
+If an older PyTorch installation reports `libtorch_cpu.so: cannot enable executable stack as shared object requires`
+on a newer glibc system, back up the library and clear its executable-stack flag with
+[patchelf](https://github.com/NixOS/patchelf). For the project's Python 3.9 `.venv`, run from the repository root:
+
+```bash
+.venv/bin/python -m pip install patchelf
+mkdir -p .venv/compat-backups
+cp --no-clobber .venv/lib/python3.9/site-packages/torch/lib/libtorch_cpu.so \
+  .venv/compat-backups/libtorch_cpu.so.before-execstack-fix
+.venv/bin/patchelf --clear-execstack .venv/lib/python3.9/site-packages/torch/lib/libtorch_cpu.so
+env -u GLIBC_TUNABLES .venv/bin/python -c "import torch; print(torch.__version__)"
+```
+
+This repairs the installed library without changing the installed PyTorch version or requiring
+`GLIBC_TUNABLES=glibc.rtld.execstack=2`. Reinstalling PyTorch can replace the repaired library;
+repeat the repair if the error returns. The backup can be copied over `libtorch_cpu.so` to undo
+the repair, provided it belongs to the same PyTorch installation.
 
 ⚠️ The file `.env_template` is here to provide an example of environment file necessary to run this repository.
 
@@ -141,8 +171,8 @@ python -m segmentation.eval_valid_multiscale <your_training_run_name> <training_
 # Generating predictions on cityscapes or pascal test set
 python -m segmentation.eval_test  <your_training_run_name> <training_stage> <batch_size> <flag_pascal>
 
-# Evaluation for consistency metric (same for stability)
-python -m segmentation.analysis.consistency <prototype_training_run_name> <training_stage> <data_type> <quantile> <threshold> <group_training_run_name>
+# Evaluation for consistency metric
+python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> <data_type> --quantile <quantile> --threshold <threshold> --group-name <group_training_run_name>
 ```
 
 ### ProtoSeg
@@ -157,9 +187,61 @@ python -m segmentation.eval_valid_multiscale <your_training_run_name> <training_
 # Generating predictions on cityscapes or pascal test set
 python -m segmentation.eval_test  <your_training_run_name> <training_stage> <batch_size> <flag_pascal>
 
-# Evaluation for consistency metric (same for stability)
-python -m segmentation.analysis.consistency <prototype_training_run_name> <training_stage> <data_type> <quantile> <threshold>
+# Evaluation for consistency metric
+python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> <data_type> --quantile <quantile> --threshold <threshold>
 ```
+
+For Cityscapes consistency evaluation, add `--official-parts-only` to retain only
+documented parts: IDs 1–4 for person/rider and IDs 1–5 for car/truck/bus. Without
+the flag, evaluation uses all decoded part IDs. The flag works with both ProtoSeg
+and ScaleProtoSeg and requires the native `annotations_SIDS` cache produced by
+parts preprocessing. Filtering happens in memory and does not modify cached labels.
+Unfiltered results use `<RESULTS_DIR>/<model>/metrics/<stage>/`; filtered results
+use its `official_parts/` subdirectory so the two modes can be compared.
+
+For Pascal consistency evaluation, add `--require-semantic-match` to require the
+Panoptic Parts semantic ID to match the VOC class at each pixel, as in ReProSeg.
+The comparison uses the original VOC IDs before the evaluator shifts their numbering;
+only positive parts of foreground classes 1–20 are retained. This requires the
+`annotations_SIDS` cache produced by `segmentation.data.preprocess_part_pascal`.
+Filtering happens in memory. Results are saved in
+`<RESULTS_DIR>/<model>/metrics/<stage>/semantic_match/`.
+Omit the flag to use the original behavior and output directory. This option changes
+only part filtering; centroid handling and score aggregation follow the existing evaluator.
+
+```bash
+# Original Pascal behavior
+python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> pascal
+
+# Require Pascal part/VOC semantic agreement
+python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> pascal --require-semantic-match
+```
+
+Both modes accept `--quantile`, `--threshold`, and `--group-name` as before.
+
+The consistency evaluator also checks OpenCV's background centroid by default.
+Add `--exclude-background-centroid` to check only actual part components. This option
+works for Pascal and Cityscapes and saves results in a `foreground_centroids/`
+subdirectory. With both Pascal options, results go to
+`metrics/<stage>/semantic_match/foreground_centroids/`:
+
+```bash
+python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> pascal \
+  --require-semantic-match --exclude-background-centroid
+```
+
+On Slurm, the included Pascal job runs quantiles 0.9, 0.8, and 0.7 with both flags,
+using `scaleproto_pascal` and `group_scaleproto_pascal` checkpoints:
+
+```bash
+cd /home/annamari/ScaleProtoSeg
+sbatch scripts/start_slurm_job.sh
+```
+
+The job requests one GPU on the `main` partition, 32 GB of memory, and eight CPUs.
+It runs on `maxitank`, where this repository, virtual environment, and VOC data reside.
+Logs go to `/home/annamari/logs/slurm-<jobid>.out`; scores go under
+`$RESULTS_DIR/scaleproto_pascal/metrics/push/semantic_match/foreground_centroids/`.
 
 For testing it is necessary to then properly arrange the output folder to match the benchmarks requirements online.
 
