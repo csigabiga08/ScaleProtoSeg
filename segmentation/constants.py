@@ -10,7 +10,9 @@ CLASS_WEIGHTS = [1.0, 1.0]  # Weights for the two classes
 
 MAX_PARTS_CITY = 5
 MAX_PARTS_PASCAL = 24
-PASCAL_FILTER_CLASS = [1, 5, 10, 11, 19]
+# Evaluator IDs: VOC IDs + 1; 0 is reserved for void.
+# Exclude background, boat, chair, dining table, and sofa.
+PASCAL_FILTER_CLASS = [1, 5, 10, 12, 19]
 
 # Taken from deeplabv2 trained on ImageNet
 CITYSCAPES_MEAN = [0.485, 0.456, 0.406]
