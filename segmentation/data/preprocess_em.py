@@ -18,7 +18,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from segmentation.constants import EM_RGB_2_ID, EM_VAL_SIZE
-from segmentation.utils import add_margins_to_image
+from segmentation.data.image_utils import add_margins_to_image
 
 load_dotenv()
 

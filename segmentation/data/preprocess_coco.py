@@ -18,7 +18,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from segmentation.constants import COCO_ID_2_LABEL, COCO_ID_MAPPING
-from segmentation.utils import add_margins_to_image
+from segmentation.data.image_utils import add_margins_to_image
 
 load_dotenv()
 

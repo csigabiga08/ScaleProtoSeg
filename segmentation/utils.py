@@ -4,44 +4,13 @@ Utility functions for segmentation models. Code from https://github.com/gmum/pro
 Extension for multi-scale use case.
 """
 
-from PIL import Image
 import numpy as np
 from pytorch_lightning import LightningModule
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from settings import log
-
-
-def add_margins_to_image(img, margin_size):
-    margin_left = img.crop((0, 0, margin_size, img.height)).transpose(Image.FLIP_LEFT_RIGHT)
-    margin_right = img.crop((img.width - margin_size, 0, img.width, img.height)).transpose(Image.FLIP_LEFT_RIGHT)
-    margin_top = img.crop((0, 0, img.width, margin_size)).transpose(Image.FLIP_TOP_BOTTOM)
-    margin_bottom = img.crop((0, img.height - margin_size, img.width, img.height)).transpose(Image.FLIP_TOP_BOTTOM)
-
-    margin_top_left = img.crop((0, 0, margin_size, margin_size)).transpose(Image.FLIP_LEFT_RIGHT).transpose(
-        Image.FLIP_TOP_BOTTOM)
-    margin_top_right = img.crop((img.width - margin_size, 0, img.width, margin_size)).transpose(
-        Image.FLIP_LEFT_RIGHT).transpose(Image.FLIP_TOP_BOTTOM)
-    margin_bottom_left = img.crop((0, img.height - margin_size, margin_size, img.height)).transpose(
-        Image.FLIP_LEFT_RIGHT).transpose(Image.FLIP_TOP_BOTTOM)
-    margin_bottom_right = img.crop(
-        (img.width - margin_size, img.height - margin_size, img.width, img.height)).transpose(
-        Image.FLIP_LEFT_RIGHT).transpose(Image.FLIP_TOP_BOTTOM)
-
-    concat_img = Image.new('RGB', (img.width + margin_size * 2, img.height + margin_size * 2))
-
-    concat_img.paste(img, (margin_size, margin_size))
-    concat_img.paste(margin_left, (0, margin_size))
-    concat_img.paste(margin_right, (img.width + margin_size, margin_size))
-    concat_img.paste(margin_top, (margin_size, 0))
-    concat_img.paste(margin_bottom, (margin_size, img.height + margin_size))
-    concat_img.paste(margin_top_left, (0, 0))
-    concat_img.paste(margin_top_right, (img.width + margin_size, 0))
-    concat_img.paste(margin_bottom_left, (0, img.height + margin_size))
-    concat_img.paste(margin_bottom_right, (img.width + margin_size, img.height + margin_size))
-
-    return concat_img
+from segmentation.data.image_utils import add_margins_to_image
 
 
 def get_params(model, key):
@@ -152,4 +121,3 @@ def non_zero_proto(model):
             set_proto_idx.extend(real_proto_id)
 
     return np.unique(np.array(set_proto_idx)).tolist()
-

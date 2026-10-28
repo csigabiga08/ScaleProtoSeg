@@ -18,7 +18,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from segmentation.constants import ADE20k_ID_2_LABEL
-from segmentation.utils import add_margins_to_image
+from segmentation.data.image_utils import add_margins_to_image
 
 load_dotenv()
 
