@@ -157,12 +157,11 @@ def run_consistency(
         tot_presence.extend(part_presence_list)
         i += 1
 
-    df_presence = pd.DataFrame(
-        tot_presence, columns=[f"part_{i}" for i in range(MAX_PARTS + 1)] + ["proto_id", "class", "img_id"]
-    )
+    part_columns = [f"part_{i}" for i in range(MAX_PARTS + 1)]
+    df_presence = pd.DataFrame(tot_presence, columns=part_columns + ["proto_id", "class", "img_id"])
     df_presence.to_csv(os.path.join(output_path, f"part_presence_th_{threshold}_qt_{quantile}.csv"), index=False)
 
-    df_mean = df_presence.groupby(["class", "proto_id"]).agg(lambda x: np.nanmean(x)).reset_index()
+    df_mean = df_presence.groupby(["class", "proto_id"])[part_columns].mean().reset_index()
     df_flag = df_mean.copy()
     df_flag[[f"part_{i}" for i in range(MAX_PARTS + 1)]] = df_flag[[f"part_{i}" for i in range(MAX_PARTS + 1)]].apply(
         lambda x: (x > threshold).astype(int), axis=1
