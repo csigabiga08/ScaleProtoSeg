@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from find_nearest import to_normalized_tensor
 from segmentation.analysis.equivariance import quantile_map
+from segmentation.checkpoints import load_model_checkpoint
 from segmentation.constants import (
     CITYSCAPES_19_EVAL_CATEGORIES,
     CITYSCAPES_CATEGORIES,
@@ -99,14 +100,14 @@ def run_consistency(
         raise NotImplementedError(f"Data type {data_type} not supported")
 
     log(f"Loading model from {checkpoint_path}")
-    ppnet = torch.load(checkpoint_path)
+    ppnet = load_model_checkpoint(checkpoint_path)
     ppnet = ppnet.cuda()
     ppnet.eval()
 
     if group_name is not None:
         group_path = os.path.join(os.environ["RESULTS_DIR"], group_name)
         checkpoint_path_group = os.path.join(group_path, f"checkpoints/th-0.05-nopush-group_last.pth")
-        ppnet_group = torch.load(checkpoint_path_group)
+        ppnet_group = load_model_checkpoint(checkpoint_path_group)
         ppnet_group.eval()
         proto_ids = proto_filter(ppnet_group)
     else:
