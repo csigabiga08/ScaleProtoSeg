@@ -201,6 +201,8 @@ def part_intersect(
     quantile: float,
     noise: Optional[float] = None,
     filter_class_ids: List[int] = [],
+    *,
+    exclude_background_centroid: bool = False,
 ) -> Tuple[Dict[int, List[int]], List[List[Any]]]:
     """Compute intersection between part labels and prototype activations."""
 
