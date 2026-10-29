@@ -50,7 +50,10 @@ def run_consistency(
     data_type: str,
     quantile: float = 0.8,
     threshold: float = 0.8,
-    group_name: str = None,
+    group_name: Optional[str] = None,
+    official_parts_only: bool = False,
+    require_semantic_match: bool = False,
+    exclude_background_centroid: bool = False,
 ):
     """Wrapper to compute the consistency across validation sets
 
@@ -75,6 +78,12 @@ def run_consistency(
         checkpoint_path = os.path.join(model_path, f"checkpoints/{training_phase}_last.pth")
 
     output_path = os.path.join(model_path, f"metrics/{training_phase}")
+    if official_parts_only:
+        output_path = os.path.join(output_path, "official_parts")
+    if require_semantic_match:
+        output_path = os.path.join(output_path, "semantic_match")
+    if exclude_background_centroid:
+        output_path = os.path.join(output_path, "foreground_centroids")
     os.makedirs(output_path, exist_ok=True)
 
     global MAX_PARTS
@@ -226,6 +235,9 @@ def part_intersect(
                 continue
             bin_part_mask = (part_mask == part_id).astype(np.uint8)
             _, _, _, centroids = cv2.connectedComponentsWithStats(bin_part_mask, 8, cv2.CV_32S)
+            # OpenCV returns the background (label 0) before the actual part components.
+            if exclude_background_centroid:
+                centroids = centroids[1:]
             centroids = np.round(centroids).astype(int)
             part_centroids[part_id] = centroids
 
