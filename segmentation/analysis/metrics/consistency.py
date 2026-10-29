@@ -25,6 +25,7 @@ from segmentation.constants import (
     PASCAL_FILTER_CLASS,
     PASCAL_ID_MAPPING,
 )
+from segmentation.data.cityscapes_parts import filter_official_parts
 from segmentation.data.dataset import PatchClassificationDataset
 from segmentation.model.model import PPNet
 from segmentation.model.model_multiscale_group import PPNetMultiScale
@@ -48,6 +49,7 @@ def run_consistency(
     model_name: str,
     training_phase: str,
     data_type: str,
+    *,
     quantile: float = 0.8,
     threshold: float = 0.8,
     group_name: Optional[str] = None,
@@ -64,10 +66,22 @@ def run_consistency(
         quantile (float, optional): Quantile to threshold the prototype activations. Defaults to 0.8.
         threshold (float, optional): Threshold for the consistency metric. Defaults to 0.8.
         group_name (str, optional): Name of the model when grouping is used. Defaults to None.
+        official_parts_only (bool): Keep only official Cityscapes semantic/part pairs.
+            Defaults to False. Filtered results go in an official_parts subdirectory.
+        require_semantic_match (bool): For Pascal, keep positive parts only where
+            panoptic SIDs match the original VOC foreground class IDs, as in ReProSeg.
+            Defaults to False (legacy behavior). Results go in a semantic_match subdirectory.
+        exclude_background_centroid (bool): Check only foreground part centroids.
+            Defaults to False (legacy behavior). Results go in a foreground_centroids subdirectory.
 
     Raises:
         NotImplementedError: Data type not supported.
     """
+
+    if official_parts_only and data_type != "cityscapes":
+        raise ValueError("official_parts_only is supported only for cityscapes")
+    if require_semantic_match and data_type != "pascal":
+        raise ValueError("require_semantic_match is supported only for pascal")
 
     model_path = os.path.join(os.environ["RESULTS_DIR"], model_name)
 
@@ -109,6 +123,10 @@ def run_consistency(
         raise NotImplementedError(f"Data type {data_type} not supported")
 
     log(f"Loading model from {checkpoint_path}")
+    log(f"Part labels: {'official Cityscapes parts only' if official_parts_only else 'all decoded part IDs'}")
+    if data_type == "pascal":
+        log(f"Pascal semantic agreement: {'required' if require_semantic_match else 'not required (legacy)'}")
+    log(f"Part centroids: {'foreground only' if exclude_background_centroid else 'including background (legacy)'}")
     ppnet = load_model_checkpoint(checkpoint_path)
     ppnet = ppnet.cuda()
     ppnet.eval()
@@ -152,7 +170,19 @@ def run_consistency(
             continue
 
         part_ann = np.load(os.path.join(path_part, img_id + ".npy"))
+        if official_parts_only:
+            # Filter in memory using native SIDs; keep the cache usable by both modes.
+            sids_path = path_cls.parent.parent / "annotations_SIDS" / path_cls.name / f"{img_id}.npy"
+            part_ann = filter_official_parts(np.load(sids_path), part_ann)
         cls_ann = np.load(os.path.join(val_dataset.annotations_dir, img_id + ".npy"))
+        if require_semantic_match:
+            sids_path = path_cls.parent.parent / "annotations_SIDS" / path_cls.name / f"{img_id}.npy"
+            sids = np.load(sids_path)
+            if sids.shape != cls_ann.shape or part_ann.shape != cls_ann.shape:
+                raise ValueError(f"Pascal semantic, part and SID annotations must have matching shapes: {img_id}")
+            # Compare native VOC IDs before convert_targets shifts 0..20 to 1..21.
+            valid = (sids == cls_ann) & (sids >= 1) & (sids <= 20) & (part_ann > 0)
+            part_ann = np.where(valid, part_ann, 0)
         cls_ann = val_dataset.convert_targets(cls_ann)
 
         with open(img_path, "rb") as f:
