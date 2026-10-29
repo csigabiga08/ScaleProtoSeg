@@ -199,6 +199,7 @@ def part_intersect(
     cls2name: Dict[int, str],
     img_id: int,
     quantile: float,
+    filter_proto_ids: Optional[List[int]] = None,
     noise: Optional[float] = None,
     filter_class_ids: List[int] = [],
     *,
