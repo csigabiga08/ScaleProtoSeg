@@ -51,6 +51,9 @@ def run_stability(
     quantile: float = 0.8,
     std_dev: float = 0.2,
     group_name: str = None,
+    checkpoint_path: str = None,
+    *,
+    exclude_background_centroid: bool = False,
 ):
     """Wrapper to compute the stability across validation sets
 
@@ -76,7 +79,9 @@ def run_stability(
     else:
         checkpoint_path = os.path.join(model_path, f"checkpoints/{training_phase}_last.pth")
 
-    output_path = os.path.join(model_path, f"metrics/{training_phase}")
+    output_path = os.path.join(model_path, "metrics", output_name)
+    if exclude_background_centroid:
+        output_path = os.path.join(output_path, "foreground_centroids")
     os.makedirs(output_path, exist_ok=True)
 
     global MAX_PARTS
@@ -102,6 +107,7 @@ def run_stability(
         raise NotImplementedError(f"Data type {data_type} not supported")
 
     log(f"Loading model from {checkpoint_path}")
+    log(f"Part centroids: {'foreground only' if exclude_background_centroid else 'including background (legacy)'}")
     ppnet = load_model_checkpoint(checkpoint_path)
     ppnet = ppnet.cuda()
     ppnet.eval()
@@ -151,9 +157,13 @@ def run_stability(
         with open(img_path, "rb") as f:
             img = Image.open(f).convert("RGB")
 
-        _, part_presence_list = part_intersect(img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile, proto_ids)
+        _, part_presence_list = part_intersect(
+            img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile, proto_ids,
+            exclude_background_centroid=exclude_background_centroid,
+        )
         _, noise_part_presence_list = part_intersect(
-            img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile, proto_ids, std_dev
+            img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile, proto_ids, std_dev,
+            exclude_background_centroid=exclude_background_centroid,
         )
 
         tot_presence.extend(part_presence_list)
@@ -232,6 +242,9 @@ def part_intersect(
                 continue
             bin_part_mask = (part_mask == part_id).astype(np.uint8)
             _, _, _, centroids = cv2.connectedComponentsWithStats(bin_part_mask, 8, cv2.CV_32S)
+            # OpenCV returns the background (label 0) before the actual part components.
+            if exclude_background_centroid:
+                centroids = centroids[1:]
             centroids = np.round(centroids).astype(int)
             part_centroids[part_id] = centroids
 
