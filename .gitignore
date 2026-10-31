@@ -198,3 +198,5 @@ hp-*.ipynb
 /data/
 
 .vscode
+
+*.code-workspace
