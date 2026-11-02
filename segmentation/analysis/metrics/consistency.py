@@ -53,6 +53,8 @@ def run_consistency(
     quantile: float = 0.8,
     threshold: float = 0.8,
     group_name: Optional[str] = None,
+    checkpoint: Optional[str] = None,
+    group_checkpoint: Optional[str] = None,
     official_parts_only: bool = False,
     require_semantic_match: bool = False,
     exclude_background_centroid: bool = False,
@@ -66,6 +68,10 @@ def run_consistency(
         quantile (float, optional): Quantile to threshold the prototype activations. Defaults to 0.8.
         threshold (float, optional): Threshold for the consistency metric. Defaults to 0.8.
         group_name (str, optional): Name of the model when grouping is used. Defaults to None.
+        checkpoint (str, optional): Explicit checkpoint for the evaluated model, overriding
+            the training-phase filename. Grouped models also supply their own prototype filter.
+        group_checkpoint (str, optional): Explicit checkpoint for prototype filtering,
+            overriding group_name and the evaluated model's own grouping.
         official_parts_only (bool): Keep only official Cityscapes semantic/part pairs.
             Defaults to False. Filtered results go in an official_parts subdirectory.
         require_semantic_match (bool): For Pascal, keep positive parts only where
@@ -85,7 +91,9 @@ def run_consistency(
 
     model_path = os.path.join(os.environ["RESULTS_DIR"], model_name)
 
-    if training_phase == "pruned":
+    if checkpoint is not None:
+        checkpoint_path = os.fspath(Path(checkpoint).expanduser())
+    elif training_phase == "pruned":
         checkpoint_path = os.path.join(model_path, "pruned/checkpoints/push_last.pth")
         # checkpoint_path = os.path.join(model_path, 'pruned/pruned.pth')
     else:
@@ -131,12 +139,18 @@ def run_consistency(
     ppnet = ppnet.cuda()
     ppnet.eval()
 
-    if group_name is not None:
-        group_path = os.path.join(os.environ["RESULTS_DIR"], group_name)
-        checkpoint_path_group = os.path.join(group_path, f"checkpoints/th-0.05-nopush-group_last.pth")
+    if group_checkpoint is not None or group_name is not None:
+        if group_checkpoint is not None:
+            checkpoint_path_group = os.fspath(Path(group_checkpoint).expanduser())
+        else:
+            group_path = os.path.join(os.environ["RESULTS_DIR"], group_name)
+            checkpoint_path_group = os.path.join(group_path, "checkpoints/th-0.05-nopush-group_last.pth")
+        log(f"Loading prototype filter from {checkpoint_path_group}")
         ppnet_group = load_model_checkpoint(checkpoint_path_group)
         ppnet_group.eval()
         proto_ids = proto_filter(ppnet_group)
+    elif checkpoint is not None and hasattr(ppnet, "group_projection"):
+        proto_ids = proto_filter(ppnet)
     else:
         proto_ids = None
 

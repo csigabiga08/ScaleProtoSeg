@@ -73,7 +73,11 @@ def run_stability(
     torch.cuda.manual_seed(0)
     model_path = os.path.join(os.environ["RESULTS_DIR"], model_name)
 
-    if training_phase == "pruned":
+    output_name = training_phase
+    if checkpoint_path is not None:
+        checkpoint_path = os.path.expanduser(checkpoint_path)
+        output_name = os.path.splitext(os.path.basename(checkpoint_path))[0]
+    elif training_phase == "pruned":
         checkpoint_path = os.path.join(model_path, "pruned/checkpoints/push_last.pth")
         # checkpoint_path = os.path.join(model_path, 'pruned/pruned.pth')
     else:
