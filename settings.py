@@ -5,11 +5,12 @@ Extended to other datasets.
 """
 
 import os
+from pathlib import Path
 
 from log import create_logger
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 base_architecture = 'vgg19'
 img_size = 224
