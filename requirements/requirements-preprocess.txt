@@ -1,0 +1,4 @@
+# Optional Panoptic Parts preprocessing for the Python 3.12 evaluation profile.
+-r requirements-eval.txt
+panoptic-parts==2.0rc6
+PyYAML==6.0.3
