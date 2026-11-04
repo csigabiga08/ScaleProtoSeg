@@ -196,6 +196,7 @@ hp-*.ipynb
 /rcp
 
 /data/
+/results/
 
 .vscode
 
