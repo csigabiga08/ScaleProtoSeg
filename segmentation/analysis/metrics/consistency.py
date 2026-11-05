@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from find_nearest import to_normalized_tensor
 from segmentation.analysis.equivariance import quantile_map
+from segmentation.analysis.metrics.output import MetricOutput
 from segmentation.checkpoints import load_model_checkpoint
 from segmentation.constants import (
     CITYSCAPES_19_EVAL_CATEGORIES,
@@ -55,6 +56,7 @@ def run_consistency(
     group_name: Optional[str] = None,
     checkpoint: Optional[str] = None,
     group_checkpoint: Optional[str] = None,
+    output_dir: Optional[str] = None,
     official_parts_only: bool = False,
     require_semantic_match: bool = False,
     exclude_background_centroid: bool = False,
@@ -72,13 +74,16 @@ def run_consistency(
             the training-phase filename. Grouped models also supply their own prototype filter.
         group_checkpoint (str, optional): Explicit checkpoint for prototype filtering,
             overriding group_name and the evaluated model's own grouping.
+        output_dir (str, optional): Exact output directory. By default a configuration
+            folder such as metrics-allparts-background is created in the checkpoint's
+            model directory. Parameters and a run description are saved per filename.
         official_parts_only (bool): Keep only official Cityscapes semantic/part pairs.
-            Defaults to False. Filtered results go in an official_parts subdirectory.
+            Defaults to False. Filtered results go in a metrics-filteredparts-* folder.
         require_semantic_match (bool): For Pascal, keep positive parts only where
             panoptic SIDs match the original VOC foreground class IDs, as in ReProSeg.
-            Defaults to False (legacy behavior). Results go in a semantic_match subdirectory.
+            Defaults to False (legacy behavior). Filtered results go in metrics-filteredparts-*.
         exclude_background_centroid (bool): Check only foreground part centroids.
-            Defaults to False (legacy behavior). Results go in a foreground_centroids subdirectory.
+            Defaults to False (legacy behavior). Results are labelled foreground.
 
     Raises:
         NotImplementedError: Data type not supported.
@@ -98,15 +103,6 @@ def run_consistency(
         # checkpoint_path = os.path.join(model_path, 'pruned/pruned.pth')
     else:
         checkpoint_path = os.path.join(model_path, f"checkpoints/{training_phase}_last.pth")
-
-    output_path = os.path.join(model_path, f"metrics/{training_phase}")
-    if official_parts_only:
-        output_path = os.path.join(output_path, "official_parts")
-    if require_semantic_match:
-        output_path = os.path.join(output_path, "semantic_match")
-    if exclude_background_centroid:
-        output_path = os.path.join(output_path, "foreground_centroids")
-    os.makedirs(output_path, exist_ok=True)
 
     global MAX_PARTS
 
@@ -139,6 +135,7 @@ def run_consistency(
     ppnet = ppnet.cuda()
     ppnet.eval()
 
+    checkpoint_path_group = None
     if group_checkpoint is not None or group_name is not None:
         if group_checkpoint is not None:
             checkpoint_path_group = os.fspath(Path(group_checkpoint).expanduser())
@@ -150,9 +147,20 @@ def run_consistency(
         ppnet_group.eval()
         proto_ids = proto_filter(ppnet_group)
     elif checkpoint is not None and hasattr(ppnet, "group_projection"):
+        checkpoint_path_group = checkpoint_path
         proto_ids = proto_filter(ppnet)
     else:
         proto_ids = None
+
+    output = MetricOutput(
+        "consistency", checkpoint_path, data_type, model_name=model_name,
+        training_phase=training_phase, quantile=quantile, threshold=threshold,
+        group_checkpoint=checkpoint_path_group, official_parts_only=official_parts_only,
+        require_semantic_match=require_semantic_match,
+        exclude_background_centroid=exclude_background_centroid, output_dir=output_dir,
+    )
+    output_path = str(output.path)
+    log(f"Results directory: {output_path}")
 
     val_dataset = PatchClassificationDataset(  # TODO: Adapt to new dataset
         data_type=data_type,
@@ -167,6 +175,7 @@ def run_consistency(
         push_prototypes=True,
     )
 
+    output.record_dataset(val_dataset)
     i = 0
     tot_presence = []
     for sample_id in tqdm(
@@ -212,7 +221,7 @@ def run_consistency(
 
     part_columns = [f"part_{i}" for i in range(MAX_PARTS + 1)]
     df_presence = pd.DataFrame(tot_presence, columns=part_columns + ["proto_id", "class", "img_id"])
-    df_presence.to_csv(os.path.join(output_path, f"part_presence_th_{threshold}_qt_{quantile}.csv"), index=False)
+    df_presence.to_csv(output.file("part_presence", "csv"), index=False)
 
     df_mean = df_presence.groupby(["class", "proto_id"])[part_columns].mean().reset_index()
     df_flag = df_mean.copy()
@@ -221,12 +230,13 @@ def run_consistency(
     )
     df_flag["is_consistent"] = df_flag[[f"part_{i}" for i in range(MAX_PARTS + 1)]].max(axis=1)
     df_mean = df_mean.merge(df_flag[["proto_id", "is_consistent"]], on="proto_id")
-    df_mean.to_csv(os.path.join(output_path, f"part_presence_mean_th_{threshold}_qt_{quantile}.csv"), index=False)
+    df_mean.to_csv(output.file("part_presence_mean", "csv"), index=False)
     consistency_score = df_mean.is_consistent.mean()
     log(f"Consistency score: {consistency_score}")
 
-    with open(os.path.join(output_path, f"consistency_score_th_{threshold}_qt_{quantile}.txt"), "w") as f:
+    with output.file("consistency_score", "txt").open("w") as f:
         f.write(f"{consistency_score}")
+    output.finish(consistency_score, i, len(df_presence))
 
 
 @torch.no_grad()
