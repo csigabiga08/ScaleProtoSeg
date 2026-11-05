@@ -191,57 +191,107 @@ python -m segmentation.eval_test  <your_training_run_name> <training_stage> <bat
 python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> <data_type> --quantile <quantile> --threshold <threshold>
 ```
 
-For Cityscapes consistency evaluation, add `--official-parts-only` to retain only
-documented parts: IDs 1–4 for person/rider and IDs 1–5 for car/truck/bus. Without
-the flag, evaluation uses all decoded part IDs. The flag works with both ProtoSeg
-and ScaleProtoSeg and requires the native `annotations_SIDS` cache produced by
-parts preprocessing. Filtering happens in memory and does not modify cached labels.
-Unfiltered results use `<RESULTS_DIR>/<model>/metrics/<stage>/`; filtered results
-use its `official_parts/` subdirectory so the two modes can be compared.
+### Consistency and stability result folders
 
-For Pascal consistency evaluation, add `--require-semantic-match` to require the
-Panoptic Parts semantic ID to match the VOC class at each pixel, as in ReProSeg.
-The comparison uses the original VOC IDs before the evaluator shifts their numbering;
-only positive parts of foreground classes 1–20 are retained. This requires the
-`annotations_SIDS` cache produced by `segmentation.data.preprocess_part_pascal`.
-Filtering happens in memory. Results are saved in
-`<RESULTS_DIR>/<model>/metrics/<stage>/semantic_match/`.
-Omit the flag to use the original behavior and output directory. This option changes
-only part filtering; centroid handling and score aggregation follow the existing evaluator.
+Both calculators save into one of four folders in the evaluated checkpoint's model
+directory. For `<model>/checkpoints/push_last.pth`, these folders are directly under
+`<model>/`; if the checkpoint is stored directly in a model directory, the folders
+are created there. Both metrics share the selected folder:
 
-```bash
-# Original Pascal behavior
-python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> pascal
-
-# Require Pascal part/VOC semantic agreement
-python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> pascal --require-semantic-match
+```text
+<model>/
+  checkpoints/
+    push_last.pth
+  metrics-allparts-background/
+  metrics-allparts-foreground/
+  metrics-filteredparts-background/
+  metrics-filteredparts-foreground/
 ```
 
-Both modes accept `--quantile`, `--threshold`, and `--group-name` as before.
+Only folders for configurations that you actually run are created. Folder names
+contain only part selection and centroid selection. `background` means foreground
+part centroids **plus** OpenCV's background centroid. `foreground` means only actual
+part-component centroids. Existing results in older directories are left in place.
 
-The consistency evaluator also checks OpenCV's background centroid by default.
-Add `--exclude-background-centroid` to check only actual part components. This option
-works for Pascal and Cityscapes and saves results in a `foreground_centroids/`
-subdirectory. With both Pascal options, results go to
-`metrics/<stage>/semantic_match/foreground_centroids/`:
+Quantiles and thresholds are included in result filenames. Stability filenames
+include the noise standard deviation and seed. Filenames also identify the evaluated
+checkpoint and grouping filter, so different checkpoint/filter configurations can
+coexist in the same folder. For example, an ungrouped run writes:
 
-```bash
-python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> pascal \
-  --require-semantic-match --exclude-background-centroid
+```text
+metrics-allparts-background/
+  consistency_score_th_0.8_qt_0.8_checkpoint_push_last_group_ungrouped.txt
+  part_presence_th_0.8_qt_0.8_checkpoint_push_last_group_ungrouped.csv
+  part_presence_mean_th_0.8_qt_0.8_checkpoint_push_last_group_ungrouped.csv
+  description_consistency_th_0.8_qt_0.8_checkpoint_push_last_group_ungrouped.json
+  stability_score_std_0.2_qt_0.8_seed_0_checkpoint_push_last_group_ungrouped.txt
+  tot_presence_stab_std_0.2_qt_0.8_seed_0_checkpoint_push_last_group_ungrouped.csv
+  description_stability_std_0.2_qt_0.8_seed_0_checkpoint_push_last_group_ungrouped.json
 ```
 
-On Slurm, the included Pascal job runs quantiles 0.9, 0.8, and 0.7 with both flags,
-using `scaleproto_pascal` and `group_scaleproto_pascal` checkpoints:
+Grouped runs use `group_grouped-<identity>` instead of `group_ungrouped` in their
+filenames. The identity is computed from the resolved grouping checkpoint path;
+its full path is recorded in the description.
+
+Each run has its own `description_<metric>_<parameters>.json`, which records the
+exact checkpoint and grouping paths, filtering flags, quantile, threshold/noise/seed,
+Python and package versions, hostname and Slurm job ID, annotation location,
+image-order digest, and completion status. Completed runs also record the score
+and the number of evaluated images and observations. Descriptions for consistency,
+stability, and different quantiles coexist. Repeating an identical configuration
+uses the same filenames; use `--output-dir` with a separate folder to retain repeats.
+The scripts print the result directory in their log.
+
+Both calculators accept these part and centroid options:
+
+| Desired configuration | Option | Folder label |
+|---|---|---|
+| All decoded parts | No part-filter flag | `allparts` |
+| Official Cityscapes semantic/part pairs | `--official-parts-only` | `filteredparts` |
+| Pascal parts matching the VOC semantic class | `--require-semantic-match` | `filteredparts` |
+| Foreground and background centroids | Default | `background` |
+| Foreground part-component centroids only | `--exclude-background-centroid` | `foreground` |
+
+Both filtered modes require the native `annotations_SIDS` cache. Filtering is applied
+in memory to both clean and noisy images and does not modify cached labels. The exact
+filter is recorded in the description; Pascal semantic matching does not apply the
+Cityscapes taxonomy.
+
+Select an exact evaluated checkpoint with `--checkpoint` for consistency or
+`--checkpoint-path` for stability. Select a prototype-filter checkpoint using
+`--group-checkpoint /path/to/group.pth` on either calculator, or retain the existing
+`--group-name /path/to/group_run` option. Stability also accepts `--seed` (default 0).
+Use `--output-dir /exact/result/folder` to override the default model-level folder;
+parameterized result files and descriptions are still written there. `RESULTS_DIR`
+continues to locate stage-selected checkpoints and relative group names; it no longer
+selects the default result directory.
+
+From `~/ScaleProtoSeg-ssd`, submit a single-quantile Pascal stability job:
 
 ```bash
-cd /home/annamari/ScaleProtoSeg
-sbatch scripts/start_slurm_job.sh
+sbatch --output="$PWD/stability-%j.out" scripts/run_metric.slurm \
+  stability scaleproto_pascal push pascal \
+  --checkpoint-path /data/shared/protoseg/scaleproto_checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
+  --group-name /data/shared/protoseg/scaleproto_checkpoints/group_scaleproto_pascal \
+  --quantile 0.8 --std-dev 0.2
 ```
 
-The job requests one GPU on the `main` partition, 32 GB of memory, and eight CPUs.
-It runs on `maxitank`, where this repository, virtual environment, and VOC data reside.
-Logs go to `/home/annamari/logs/slurm-<jobid>.out`; scores go under
-`$RESULTS_DIR/scaleproto_pascal/metrics/push/semantic_match/foreground_centroids/`.
+To use Pascal semantic matching and foreground centroids, append
+`--require-semantic-match --exclude-background-centroid`. To run consistency, use:
+
+```bash
+sbatch --output="$PWD/consistency-%j.out" scripts/run_metric.slurm \
+  consistency scaleproto_pascal push pascal \
+  --checkpoint /data/shared/protoseg/scaleproto_checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
+  --group-name /data/shared/protoseg/scaleproto_checkpoints/group_scaleproto_pascal \
+  --quantile 0.8 --threshold 0.8
+```
+
+The Slurm wrapper requests one GPU on TANK, eight CPUs, and 32 GB of memory.
+Override the node with `sbatch --nodelist=maxitank ...` when using that node's checkout
+and preprocessed data. `/data_ssd` storage can differ between nodes: the updated code
+and configured caches must be available on the node you select. The description's
+hostname and annotation path identify which environment was used.
 
 For testing it is necessary to then properly arrange the output folder to match the benchmarks requirements online.
 
