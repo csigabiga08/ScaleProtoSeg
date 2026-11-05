@@ -39,7 +39,10 @@ def _protocol_without_quantile(record):
             f"Measurement {record.get('measurement_id')} has unknown protocol version; "
             "comparability is unverified"
         )
-    required = ("activation", "centroids", "parts", "classes", "prototype_selection", "consistency")
+    required = (
+        "activation", "centroids", "parts", "classes", "prototype_selection", "consistency",
+        "input", "model",
+    )
     if any(not isinstance(protocol.get(field), dict) or not protocol[field] for field in required):
         raise VisualizationError(
             f"Measurement {record.get('measurement_id')} has incomplete protocol identity; comparability is unverified"
@@ -95,7 +98,12 @@ def _protocol_without_quantile(record):
 
     for path, expected_type in critical_fields.items():
         known_value(path, expected_type)
-    for path in ("activation.normalization_mean", "activation.normalization_std"):
+    for path in (
+        "activation.normalization_mean",
+        "activation.normalization_std",
+        "input.normalization.mean",
+        "input.normalization.std",
+    ):
         values = known_value(path, list)
         if len(values) != 3 or any(
             isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
@@ -105,6 +113,24 @@ def _protocol_without_quantile(record):
                 f"Measurement {record.get('measurement_id')} has unknown protocol field "
                 f"{path}; comparability is unverified"
             )
+    for path in (
+        "input.source",
+        "input.resolution",
+        "input.normalization.conversion",
+        "model.prototype_activation_function",
+    ):
+        known_value(path, str)
+    epsilon = protocol["model"].get("epsilon")
+    if (
+        isinstance(epsilon, bool)
+        or not isinstance(epsilon, (int, float))
+        or not math.isfinite(epsilon)
+        or epsilon <= 0
+    ):
+        raise VisualizationError(
+            f"Measurement {record.get('measurement_id')} has unknown protocol field "
+            "model.epsilon; comparability is unverified"
+        )
     valid_part_ids = known_value("parts.valid_part_ids", list)
     if not valid_part_ids or any(
         isinstance(value, bool) or not isinstance(value, int) or value <= 0

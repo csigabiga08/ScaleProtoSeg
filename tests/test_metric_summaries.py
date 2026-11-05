@@ -57,6 +57,16 @@ CONSISTENCY_PROTOCOL = {
         "group_nonzero_rule": "nonzero",
         "group_intersection_rule": "none",
     },
+    "model": {"epsilon": 1e-4, "prototype_activation_function": "log"},
+    "input": {
+        "source": "fixture image",
+        "resolution": "native",
+        "normalization": {
+            "conversion": "RGB tensor in [0, 1]",
+            "mean": [0.1, 0.2, 0.3],
+            "std": [1.0, 1.0, 1.0],
+        },
+    },
     "consistency": {
         "threshold": 0.8,
         "strict_comparison": "mean part presence > threshold",
@@ -591,6 +601,29 @@ class MetricSummaryTests(unittest.TestCase):
                 Path(self.temporary.name) / "unknown-protocol-plots",
                 root=self.root,
             )
+
+    def test_comparison_rejects_null_model_and_input_protocol_values(self):
+        unknown_fields = (
+            ("input.normalization.mean", None),
+            ("model.epsilon", None),
+        )
+        for field_path, unknown_value in unknown_fields:
+            with self.subTest(field=field_path):
+                record = legacy_record("unknown-" + field_path.replace(".", "-"))
+                record["model"]["inputs"]["prototype_checkpoint"]["sha256"] = "b" * 64
+                record["dataset"]["identity"] = "same-manifest"
+                section, field = field_path.split(".", 1)
+                target = record["protocol"][section]
+                for component in field.split(".")[:-1]:
+                    target = target[component]
+                target[field.split(".")[-1]] = unknown_value
+                record["provenance_quality"]["missing_fields"].append(field_path)
+
+                with self.assertRaisesRegex(
+                    visualizations.VisualizationError,
+                    field_path.replace(".", r"\."),
+                ):
+                    visualizations._compatibility_signature(record)
 
     def test_all_unavailable_part_combinations_are_retained_as_unverified_support(self):
         record = legacy_record("sparse-support")
