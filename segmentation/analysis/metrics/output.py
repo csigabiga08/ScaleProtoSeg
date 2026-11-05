@@ -270,6 +270,10 @@ class MetricOutput:
                     "part annotation mapping identity",
                     "part annotation provenance",
                     "model epsilon",
+                    "model.prototype_activation_function",
+                    "parts.mapping_identity",
+                    "parts.class_dependent_part_definitions",
+                    "parts.annotation_provenance",
                 ],
                 "warnings": ["Dataset identity is partial; no full dataset content hash was computed."],
             },
@@ -346,10 +350,19 @@ class MetricOutput:
         if mapping_identity.get("status") == "available":
             if "part annotation mapping identity" in missing_fields:
                 missing_fields.remove("part annotation mapping identity")
-        elif "part annotation mapping identity" not in missing_fields:
-            missing_fields.append("part annotation mapping identity")
+            if "parts.mapping_identity" in missing_fields:
+                missing_fields.remove("parts.mapping_identity")
+        elif "parts.mapping_identity" not in missing_fields:
+            missing_fields.append("parts.mapping_identity")
+        definitions = mapping_metadata["class_dependent_part_definitions"]
+        if definitions is not None and "parts.class_dependent_part_definitions" in missing_fields:
+            missing_fields.remove("parts.class_dependent_part_definitions")
+        elif definitions is None and "parts.class_dependent_part_definitions" not in missing_fields:
+            missing_fields.append("parts.class_dependent_part_definitions")
         if "part annotation provenance" not in missing_fields:
             missing_fields.append("part annotation provenance")
+        if "parts.annotation_provenance" not in missing_fields:
+            missing_fields.append("parts.annotation_provenance")
         self.result["provenance_quality"]["warnings"].append(
             "The preprocessing provenance linking part annotations to the mapping is unknown."
         )
@@ -492,6 +505,10 @@ class MetricOutput:
             missing_fields.append("model epsilon")
         elif epsilon is not None and "model epsilon" in missing_fields:
             missing_fields.remove("model epsilon")
+        if activation is None and "model.prototype_activation_function" not in missing_fields:
+            missing_fields.append("model.prototype_activation_function")
+        elif activation is not None and "model.prototype_activation_function" in missing_fields:
+            missing_fields.remove("model.prototype_activation_function")
         self.update_protocol(
             model={
                 "epsilon": epsilon,

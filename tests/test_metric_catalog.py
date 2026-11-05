@@ -33,7 +33,7 @@ class MetricCatalogTests(unittest.TestCase):
         self.checkpoint.write_bytes(b"tiny checkpoint payload")
 
     def make_output(self, **parameters):
-        return MetricOutput(
+        output = MetricOutput(
             "consistency",
             self.checkpoint,
             "pascal",
@@ -61,12 +61,21 @@ class MetricCatalogTests(unittest.TestCase):
                 "parts": {
                     "valid_part_ids": [1, 2, 3],
                     "maximum_part_id": 3,
-                    "mapping_identity": {"status": "unknown", "reason": "not supplied in fixture"},
-                    "class_dependent_part_definitions": None,
-                    "annotation_provenance": "unknown",
+                    "mapping_identity": {
+                        "status": "available",
+                        "path": "fixture/parts.yaml",
+                        "bytes": 1,
+                        "sha256": "a" * 64,
+                    },
+                    "class_dependent_part_definitions": {"fixture": {"1": "fixture part"}},
+                    "annotation_provenance": "fixture annotation provenance",
                 },
                 "classes": {
-                    "id_convention": {"model_class_index": "evaluation_class_id - 1"},
+                    "id_convention": {
+                        "semantic_mapping_input_ids": "source annotation IDs",
+                        "semantic_mapping_output_ids": "one-based evaluator IDs",
+                        "model_class_index": "evaluation_class_id - 1",
+                    },
                     "evaluation_class_id_to_label": {"2": "aeroplane"},
                     "ignored_or_void_evaluation_class_id": 0,
                     "background_evaluation_class_id": 1,
@@ -78,7 +87,7 @@ class MetricCatalogTests(unittest.TestCase):
                     "prototype_class_consistent": "any part flag is one",
                     "aggregation": "unweighted mean over class/prototype rows",
                 },
-                "model": {"epsilon": None, "prototype_activation_function": None},
+                "model": {"epsilon": 1e-4, "prototype_activation_function": "log"},
                 "input": {
                     "source": "cached validation image",
                     "resolution": "native resolution",
@@ -99,6 +108,10 @@ class MetricCatalogTests(unittest.TestCase):
             },
             **parameters,
         )
+        missing_fields = output.result["provenance_quality"]["missing_fields"]
+        missing_fields.remove("model epsilon")
+        missing_fields.remove("model.prototype_activation_function")
+        return output
 
     def test_helpers_import_without_torch_or_settings(self):
         code = (
@@ -332,6 +345,55 @@ class MetricCatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(CatalogError, "protocol"):
                 load_measurement(output.path)
 
+    def test_completed_record_rejects_protocol_unknowns_without_matching_gap(self):
+        unknown_fields = (
+            ("activation", "quantile_support", "activation.quantile_support"),
+            ("input.normalization", "mean", "input.normalization.mean"),
+            ("parts.mapping_identity", None, "parts.mapping_identity"),
+        )
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            output.set_candidates([])
+            output.finish(value=0.0, numerator=0, denominator=1)
+            result_path = output.path / "result.json"
+            original = json.loads(result_path.read_text())
+            for path, field, missing_name in unknown_fields:
+                with self.subTest(path=path, field=field):
+                    result = json.loads(json.dumps(original))
+                    target = result["protocol"]
+                    for part in path.split("."):
+                        target = target[part]
+                    if field is None:
+                        target.clear()
+                        target.update(
+                            status="unknown",
+                            reason="mapping specification unavailable in this measurement",
+                        )
+                    else:
+                        target[field] = None
+                    result["provenance_quality"]["missing_fields"] = []
+                    result_path.write_text(json.dumps(result))
+                    with self.assertRaises(CatalogError):
+                        load_measurement(output.path)
+
+                    result["provenance_quality"]["missing_fields"] = [missing_name]
+                    result_path.write_text(json.dumps(result))
+                    self.assertEqual(load_measurement(output.path)["status"], "complete")
+            result_path.write_text(json.dumps(original))
+
+    def test_completed_record_rejects_empty_part_mapping_identity_even_with_gap(self):
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            output.set_candidates([])
+            output.finish(value=0.0, numerator=0, denominator=1)
+            result_path = output.path / "result.json"
+            result = json.loads(result_path.read_text())
+            result["protocol"]["parts"]["mapping_identity"] = {}
+            result["provenance_quality"]["missing_fields"] = ["parts.mapping_identity"]
+            result_path.write_text(json.dumps(result))
+            with self.assertRaisesRegex(CatalogError, "mapping identity"):
+                load_measurement(output.path)
+
     def test_early_failed_record_does_not_require_completed_protocol_or_checkpoint_identity(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output()
@@ -350,9 +412,15 @@ class MetricCatalogTests(unittest.TestCase):
             output.result["protocol"]["model"].update(epsilon=None)
             output.result["protocol"]["parts"].update(
                 mapping_identity={"status": "unknown", "reason": "not available in this fixture"},
+                class_dependent_part_definitions=None,
                 annotation_provenance="unknown",
             )
-            output.result["provenance_quality"]["missing_fields"].append("model epsilon")
+            output.result["provenance_quality"]["missing_fields"].extend([
+                "model.epsilon",
+                "parts.mapping_identity",
+                "parts.class_dependent_part_definitions",
+                "parts.annotation_provenance",
+            ])
             output.set_candidates([])
             output.finish(value=0.0, numerator=0, denominator=1)
             record = load_measurement(output.path)
