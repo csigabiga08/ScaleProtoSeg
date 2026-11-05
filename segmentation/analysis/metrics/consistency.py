@@ -89,15 +89,23 @@ def _protocol(metric, data_type, class_map, semantic_map, max_parts, *, quantile
             "valid_part_ids": list(range(1, max_parts + 1)),
             "maximum_part_id": max_parts,
             "part_mapping_identity": f"{data_type} preprocessed part annotation",
+            "annotation_provenance": "unknown",
             "official_parts_only": official_parts_only,
             "require_semantic_match": require_semantic_match,
             "missing_part_annotation": "candidate excluded before processing",
         },
+        "model": {"epsilon": None, "prototype_activation_function": None},
         "classes": {
             "semantic_id_to_evaluation_id": semantic_map,
-            "evaluation_class_id_to_label": {str(key): value for key, value in class_map.items()},
-            "background_id": 0,
-            "excluded_evaluation_ids": list(PASCAL_FILTER_CLASS) if data_type == "pascal" else [],
+            "id_convention": {
+                "semantic_mapping_input_ids": "source annotation IDs before dataset.convert_targets",
+                "semantic_mapping_output_ids": "one-based evaluator IDs; zero is ignored/void",
+                "model_class_index": "evaluation_class_id - 1",
+            },
+            "evaluation_class_id_to_label": {str(key + 1): value for key, value in class_map.items()},
+            "ignored_or_void_evaluation_class_id": 0,
+            "background_evaluation_class_id": 1 if data_type == "pascal" else None,
+            "excluded_evaluation_class_ids": list(PASCAL_FILTER_CLASS) if data_type == "pascal" else [],
         },
         "consistency": {
             "threshold": threshold,
@@ -111,7 +119,7 @@ def _protocol(metric, data_type, class_map, semantic_map, max_parts, *, quantile
 
 
 def _add_observations(output, rows, class_map, max_parts):
-    label_to_id = {label: class_id for class_id, label in class_map.items()}
+    label_to_id = {label: model_class_index + 1 for model_class_index, label in class_map.items()}
     for row in rows:
         class_name = row[max_parts + 2]
         observation = {
@@ -253,6 +261,11 @@ def run_consistency(
         selected_ids = _selected_prototypes(ppnet, proto_ids, FILTER_CLASS)
         output.set_selected_prototype_ids(selected_ids)
         output.update_model_metadata(architecture=type(ppnet).__name__)
+        output.record_model_runtime(
+            ppnet,
+            grouping_active=proto_ids is not None,
+            excluded_evaluation_class_ids=FILTER_CLASS,
+        )
 
         val_dataset = PatchClassificationDataset(  # TODO: Adapt to new dataset
             data_type=data_type,

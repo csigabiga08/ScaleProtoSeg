@@ -119,6 +119,46 @@ def validate_result(result):
     if not isinstance(result["artifacts"], dict) or not isinstance(result["scores"], dict):
         raise CatalogError("Measurement artifacts and scores must be objects")
     if result["status"] in ("complete", "failed"):
+        if result.get("origin") != "native":
+            raise CatalogError("A terminal measurement must declare native origin")
+        for section in ("model", "dataset", "protocol", "execution", "provenance_quality"):
+            if not isinstance(result.get(section), dict):
+                raise CatalogError(f"Terminal measurement is missing native {section} metadata")
+        model = result["model"]
+        if any(key not in model for key in ("label", "training_stage", "dataset", "training_seed", "inputs")):
+            raise CatalogError("Terminal measurement is missing native model fields")
+        if "seed" in model:
+            raise CatalogError("Metric parameter seeds must not be stored as model seed")
+        if not isinstance(model["inputs"], dict) or not model["inputs"]:
+            raise CatalogError("Terminal measurement is missing model inputs")
+        dataset = result["dataset"]
+        if any(key not in dataset for key in ("name", "split", "identity")):
+            raise CatalogError("Terminal measurement is missing native dataset fields")
+        if not isinstance(dataset["identity"], str):
+            raise CatalogError("Terminal measurement is missing dataset identity")
+        protocol = result["protocol"]
+        if (
+            protocol.get("version") != 1
+            or protocol.get("metric") != result["metric"]
+            or not isinstance(protocol.get("observation_columns"), list)
+            or not protocol["observation_columns"]
+        ):
+            raise CatalogError("Terminal measurement is missing its native protocol")
+        execution = result["execution"]
+        execution_fields = (
+            "commit", "tracked_diff", "relevant_untracked_source", "submodules", "missing",
+            "command", "python", "python_executable", "packages", "host", "scheduler_job_id",
+        )
+        if any(field not in execution for field in execution_fields):
+            raise CatalogError("Terminal measurement is missing native execution provenance")
+        if not isinstance(execution["packages"], dict):
+            raise CatalogError("Terminal measurement is missing execution package provenance")
+        provenance_quality = result["provenance_quality"]
+        if (
+            not isinstance(provenance_quality.get("missing_fields"), list)
+            or not isinstance(provenance_quality.get("warnings"), list)
+        ):
+            raise CatalogError("Terminal measurement is missing provenance quality metadata")
         score = result["scores"].get(result["metric"])
         if not isinstance(score, dict) or score.get("unit") != "fraction":
             raise CatalogError("A terminal measurement must contain its fractional metric score")

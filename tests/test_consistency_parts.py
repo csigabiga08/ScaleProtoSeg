@@ -44,6 +44,24 @@ class ConsistencyPartsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "matching shapes"):
             filter_official_parts(np.array([[24]]), np.array([[1, 5]]))
 
+    def test_pascal_observations_use_one_based_evaluator_class_ids(self):
+        output = MagicMock()
+        max_parts = consistency.MAX_PARTS_PASCAL
+        row = [np.nan] * (max_parts + 1) + [7, "aeroplane", "sample"]
+        consistency._add_observations(output, [row], {1: "aeroplane"}, max_parts)
+        observation = output.add_observation.call_args.kwargs
+        self.assertEqual(observation["class_id"], 2)
+
+        protocol = consistency._protocol(
+            "consistency", "pascal", {1: "aeroplane"}, consistency.PASCAL_ID_MAPPING,
+            max_parts, quantile=0.8, threshold=0.8, official_parts_only=False,
+            require_semantic_match=False, exclude_background_centroid=False,
+        )
+        self.assertEqual(protocol["classes"]["id_convention"]["model_class_index"], "evaluation_class_id - 1")
+        self.assertEqual(protocol["classes"]["evaluation_class_id_to_label"], {"2": "aeroplane"})
+        self.assertEqual(protocol["classes"]["background_evaluation_class_id"], 1)
+        self.assertIn(1, protocol["classes"]["excluded_evaluation_class_ids"])
+
     def test_evaluator_switches_modes_without_changing_cache(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
             root = Path(tmp)
@@ -82,6 +100,15 @@ class ConsistencyPartsTests(unittest.TestCase):
                 np.testing.assert_array_equal(intersect.call_args.args[2], original_parts)
                 unfiltered_bundle, unfiltered = latest_record(catalog_root)
                 self.assertEqual(unfiltered["status"], "complete")
+                self.assertEqual(unfiltered["protocol"]["parts"]["annotation_provenance"], "unknown")
+                self.assertEqual(
+                    unfiltered["protocol"]["parts"]["class_dependent_part_definitions"]["person"],
+                    {"semantic_ids": [24, 25], "part_ids": [1, 2, 3, 4]},
+                )
+                self.assertEqual(
+                    unfiltered["protocol"]["parts"]["mapping_identity"]["identity_kind"],
+                    "official Cityscapes filter implementation",
+                )
                 unfiltered_score = unfiltered["scores"]["consistency"]["value"]
 
                 with self.assertRaises(FileNotFoundError):

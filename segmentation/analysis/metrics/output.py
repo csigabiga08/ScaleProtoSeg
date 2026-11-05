@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import uuid
+import yaml
 
 from segmentation.analysis.metrics.catalog import (
     CatalogError,
@@ -59,8 +60,13 @@ def _json_value(value):
         return {str(key): _json_value(item) for key, item in value.items()}
     if isinstance(value, (tuple, list, set)):
         return [_json_value(item) for item in value]
-    if hasattr(value, "item"):
-        return _json_value(value.item())
+    if type(value).__module__.split(".", 1)[0] in ("numpy", "torch"):
+        item = getattr(value, "item", None)
+        if callable(item):
+            try:
+                return _json_value(item())
+            except (TypeError, ValueError, RuntimeError):
+                return str(value)
     return str(value)
 
 
@@ -183,6 +189,8 @@ class MetricOutput:
             except FileExistsError:
                 continue
         self.metric = str(metric)
+        self.data_type = str(data_type)
+        protocol = _json_value(protocol)
         self.observation_columns = list(protocol.get("observation_columns", ()))
         self.observation_table_columns = list(OBSERVATION_KEY) + self.observation_columns
         if not self.observation_columns:
@@ -217,7 +225,7 @@ class MetricOutput:
                 "label": model_name,
                 "training_stage": training_phase,
                 "dataset": data_type,
-                "seed": parameters.get("seed"),
+                "training_seed": None,
                 "architecture": None,
                 "inputs": inputs,
             },
@@ -252,6 +260,8 @@ class MetricOutput:
                     "model architecture",
                     "dataset manifest identity",
                     "part annotation mapping identity",
+                    "part annotation provenance",
+                    "model epsilon",
                 ],
                 "warnings": ["Dataset identity is partial; no full dataset content hash was computed."],
             },
@@ -294,6 +304,7 @@ class MetricOutput:
         self._ensure_running()
         sample_ids = list(dataset.img_ids)
         annotations = Path(dataset.annotations_dir).expanduser().resolve()
+        dataset_root = annotations.parent.parent
         part_dir = annotations.parent.parent / "annotations_PIDS" / annotations.name
         part_available = [sample_id for sample_id in sample_ids if (part_dir / f"{sample_id}.npy").is_file()]
         self.result["dataset"].update({
@@ -320,8 +331,86 @@ class MetricOutput:
         ]
         if len(part_available) != len(sample_ids):
             self.result["provenance_quality"]["missing_fields"].append("part annotation coverage")
+        mapping_metadata = self._part_mapping_metadata(dataset_root)
+        self.result["protocol"].setdefault("parts", {}).update(mapping_metadata)
+        mapping_identity = mapping_metadata["mapping_identity"]
+        missing_fields = self.result["provenance_quality"]["missing_fields"]
+        if mapping_identity.get("status") == "available":
+            if "part annotation mapping identity" in missing_fields:
+                missing_fields.remove("part annotation mapping identity")
+        elif "part annotation mapping identity" not in missing_fields:
+            missing_fields.append("part annotation mapping identity")
+        if "part annotation provenance" not in missing_fields:
+            missing_fields.append("part annotation provenance")
+        self.result["provenance_quality"]["warnings"].append(
+            "The preprocessing provenance linking part annotations to the mapping is unknown."
+        )
         self.set_candidates(sample_ids)
         self._write_result()
+
+    def _part_mapping_metadata(self, dataset_root):
+        annotation_provenance = "unknown"
+        if self.data_type == "cityscapes":
+            mapping_file = Path(__file__).resolve().parents[3] / "segmentation" / "data" / "cityscapes_parts.py"
+            definitions = {
+                "person": {"semantic_ids": [24, 25], "part_ids": [1, 2, 3, 4]},
+                "rider": {"semantic_ids": [24, 25], "part_ids": [1, 2, 3, 4]},
+                "car": {"semantic_ids": [26, 27, 28], "part_ids": [1, 2, 3, 4, 5]},
+                "truck": {"semantic_ids": [26, 27, 28], "part_ids": [1, 2, 3, 4, 5]},
+                "bus": {"semantic_ids": [26, 27, 28], "part_ids": [1, 2, 3, 4, 5]},
+            }
+            mapping_identity = _file_identity(mapping_file, self._input_hash_cache)
+            mapping_identity["identity_kind"] = "official Cityscapes filter implementation"
+            return {
+                "mapping_identity": mapping_identity,
+                "class_dependent_part_definitions": definitions,
+                "annotation_provenance": annotation_provenance,
+            }
+
+        candidates = [Path(dataset_root) / "parts.yaml", Path(dataset_root).parent / "parts.yaml"]
+        if self.data_type == "pascal":
+            configured_source = os.environ.get("SOURCE_DATA_PATH_PASCAL")
+            if configured_source:
+                candidates.append(Path(configured_source).expanduser() / "parts.yaml")
+        mapping_file = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
+        if mapping_file is None:
+            return {
+                "mapping_identity": {
+                    "status": "unknown",
+                    "reason": "No configured parts.yaml mapping specification was available.",
+                },
+                "class_dependent_part_definitions": None,
+                "annotation_provenance": annotation_provenance,
+            }
+        try:
+            mapping = yaml.safe_load(mapping_file.read_text(encoding="utf-8"))
+            class_parts = mapping["scene_class2part_classes"]
+            countable_groups = mapping.get("countable_pids_groupings", {})
+            if not isinstance(class_parts, dict) or not isinstance(countable_groups, dict):
+                raise ValueError("unexpected Pascal part mapping schema")
+            definitions = {
+                str(class_name): {
+                    "semantic_class_id": class_index + 1,
+                    "part_ids": {str(part_name): part_index + 1 for part_index, part_name in enumerate(parts)},
+                    "countable_pid_groups": countable_groups.get(class_name, {}),
+                }
+                for class_index, (class_name, parts) in enumerate(class_parts.items())
+            }
+        except (OSError, UnicodeDecodeError, yaml.YAMLError, KeyError, TypeError, ValueError) as error:
+            return {
+                "mapping_identity": {
+                    "status": "invalid",
+                    "path": str(mapping_file),
+                    "reason": str(error)[:200],
+                },
+                "class_dependent_part_definitions": None,
+                "annotation_provenance": annotation_provenance,
+            }
+        return {
+            "mapping_identity": _file_identity(mapping_file, self._input_hash_cache),
+            "class_dependent_part_definitions": definitions,
+            "annotation_provenance": annotation_provenance,
+        }
 
     def set_candidates(self, sample_ids):
         self._ensure_running()
@@ -365,6 +454,59 @@ class MetricOutput:
             if "model architecture" in missing:
                 missing.remove("model architecture")
         self._write_result()
+
+    def update_protocol(self, **fields):
+        self._ensure_running()
+        self.result["protocol"].update(_json_value(fields))
+        self._write_result()
+
+    def record_model_runtime(self, model, *, grouping_active, excluded_evaluation_class_ids):
+        epsilon = getattr(model, "epsilon", None)
+        if type(epsilon).__module__.split(".", 1)[0] in ("numpy", "torch"):
+            item = getattr(epsilon, "item", None)
+            try:
+                epsilon = item() if callable(item) else None
+            except (TypeError, ValueError, RuntimeError):
+                epsilon = None
+        epsilon = float(epsilon) if isinstance(epsilon, (int, float)) else None
+        activation = getattr(model, "prototype_activation_function", None)
+        activation = activation if isinstance(activation, str) else None
+        missing_fields = self.result["provenance_quality"]["missing_fields"]
+        if epsilon is None and "model epsilon" not in missing_fields:
+            missing_fields.append("model epsilon")
+        elif epsilon is not None and "model epsilon" in missing_fields:
+            missing_fields.remove("model epsilon")
+        self.update_protocol(
+            model={
+                "epsilon": epsilon,
+                "prototype_activation_function": activation,
+            },
+            input={
+                "source": "cached validation image opened by get_img_path and converted to RGB",
+                "resolution": "native cached image resolution; no metric resize before feature extraction",
+                "normalization": {
+                    "conversion": "PIL RGB uint8 to tensor in [0, 1]",
+                    "mean": [0.485, 0.456, 0.406],
+                    "std": [0.229, 0.224, 0.225],
+                },
+            },
+            prototype_selection={
+                "class_identity_rule": (
+                    "select nonzero prototype_class_identity entries at model class index "
+                    "evaluation_class_id - 1"
+                ),
+                "excluded_evaluation_class_ids": list(excluded_evaluation_class_ids),
+                "grouping_active": bool(grouping_active),
+                "group_nonzero_rule": (
+                    "torch.nonzero(group_projection[class].weight.data.sum(dim=0)); "
+                    "map selected positions through nonzero prototype_class_identity[:, class]"
+                ),
+                "group_intersection_rule": (
+                    "retain model prototype IDs selected by the grouping checkpoint"
+                    if grouping_active else "no grouping-checkpoint filter"
+                ),
+            },
+        )
 
     def set_selected_prototype_ids(self, prototype_ids):
         self.update_metadata(selected_prototype_ids=list(dict.fromkeys(int(value) for value in prototype_ids)))

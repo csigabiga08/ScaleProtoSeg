@@ -11,7 +11,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from segmentation.analysis.metrics.catalog import (
     CatalogError,
@@ -41,6 +41,7 @@ class MetricCatalogTests(unittest.TestCase):
             training_phase="push",
             protocol={
                 "version": 1,
+                "metric": "consistency",
                 "observation_columns": ["part_1", "part_2", "part_3"],
             },
             **parameters,
@@ -49,7 +50,7 @@ class MetricCatalogTests(unittest.TestCase):
     def test_helpers_import_without_torch_or_settings(self):
         code = (
             "import sys; "
-            "from segmentation.analysis.metrics import catalog; "
+            "from segmentation.analysis.metrics import catalog, output; "
             "assert 'torch' not in sys.modules; "
             "assert 'settings' not in sys.modules"
         )
@@ -175,6 +176,130 @@ class MetricCatalogTests(unittest.TestCase):
                 "no eligible prototype observations",
             )
             self.assertIsNone(record["scores"]["consistency"]["numerator"])
+
+    def test_terminal_records_require_native_metadata_sections(self):
+        required_sections = (
+            ("model", "inputs"),
+            ("protocol", None),
+            ("execution", None),
+            ("provenance_quality", None),
+            ("dataset", "identity"),
+            ("execution", "packages"),
+            ("provenance_quality", "missing_fields"),
+        )
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            output.set_candidates([])
+            output.finish(value=float("nan"), reason="no eligible prototype observations")
+            result_path = output.path / "result.json"
+            original = json.loads(result_path.read_text())
+            for section, child in required_sections:
+                with self.subTest(section=section, child=child):
+                    result = json.loads(json.dumps(original))
+                    if child is None:
+                        result.pop(section)
+                    elif section in result:
+                        result[section].pop(child)
+                    result_path.write_text(json.dumps(result))
+                    with self.assertRaisesRegex(CatalogError, "missing"):
+                        load_measurement(output.path)
+            result_path.write_text(json.dumps(original))
+            self.assertEqual(load_measurement(output.path)["status"], "complete")
+
+    def test_explicit_unknown_provenance_is_valid_and_noise_seed_is_not_model_seed(self):
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output(seed=41)
+            output.result["protocol"]["model"] = {"epsilon": None}
+            output.result["protocol"]["parts"] = {
+                "mapping_identity": None,
+                "annotation_provenance": "unknown",
+            }
+            output.result["provenance_quality"]["missing_fields"].append("model epsilon")
+            output.set_candidates([])
+            output.finish(value=0.0, numerator=0, denominator=1)
+            record = load_measurement(output.path)
+            self.assertNotIn("seed", record["model"])
+            self.assertIsNone(record["model"]["training_seed"])
+            self.assertEqual(record["parameters"]["seed"], 41)
+            self.assertIsNone(record["protocol"]["model"]["epsilon"])
+            self.assertEqual(record["protocol"]["parts"]["annotation_provenance"], "unknown")
+
+    def test_dataset_records_available_pascal_part_mapping_and_unknown_annotation_provenance(self):
+        mapping_root = Path(self.temporary.name) / "pascal-source"
+        mapping_root.mkdir()
+        mapping_path = mapping_root / "parts.yaml"
+        mapping_path.write_text(
+            "scene_class2part_classes:\n"
+            "  person: [head, torso]\n"
+            "countable_pids_groupings:\n"
+            "  person:\n"
+            "    head: [1, 2]\n"
+        )
+        annotation_root = Path(self.temporary.name) / "pascal-processed" / "annotations" / "val"
+        annotation_root.mkdir(parents=True)
+        dataset = type(
+            "Dataset",
+            (),
+            {"img_ids": ["one"], "annotations_dir": str(annotation_root)},
+        )()
+        with (
+            patch.dict(os.environ, {
+                "MEASUREMENT_CATALOG_ROOT": str(self.root),
+                "SOURCE_DATA_PATH_PASCAL": str(mapping_root),
+            }),
+        ):
+            output = self.make_output()
+            output.record_dataset(dataset)
+            parts = output.result["protocol"]["parts"]
+            self.assertEqual(parts["mapping_identity"]["path"], str(mapping_path.resolve()))
+            self.assertEqual(parts["mapping_identity"]["status"], "available")
+            self.assertEqual(
+                parts["class_dependent_part_definitions"]["person"],
+                {
+                    "semantic_class_id": 1,
+                    "part_ids": {"head": 1, "torso": 2},
+                    "countable_pid_groups": {"head": [1, 2]},
+                },
+            )
+            self.assertEqual(parts["annotation_provenance"], "unknown")
+
+    def test_loaded_model_runtime_is_added_to_protocol_not_model_seed(self):
+        model = type(
+            "Model",
+            (),
+            {"epsilon": 0.0007, "prototype_activation_function": "linear"},
+        )()
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output(seed=41)
+            output.record_model_runtime(
+                model,
+                grouping_active=True,
+                excluded_evaluation_class_ids=[1, 5],
+            )
+            protocol = output.result["protocol"]
+            self.assertEqual(protocol["model"]["epsilon"], 0.0007)
+            self.assertEqual(protocol["model"]["prototype_activation_function"], "linear")
+            self.assertEqual(protocol["input"]["resolution"], "native cached image resolution; no metric resize before feature extraction")
+            self.assertEqual(protocol["input"]["normalization"]["mean"], [0.485, 0.456, 0.406])
+            self.assertTrue(protocol["prototype_selection"]["grouping_active"])
+            self.assertIn("torch.nonzero(group_projection", protocol["prototype_selection"]["group_nonzero_rule"])
+            self.assertNotIn("seed", output.result["model"])
+            self.assertEqual(output.result["parameters"]["seed"], 41)
+
+    def test_unknown_runtime_model_attributes_are_recorded_as_explicit_unknowns(self):
+        model = MagicMock()
+        try:
+            with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+                output = self.make_output()
+                output.record_model_runtime(
+                    model,
+                    grouping_active=False,
+                    excluded_evaluation_class_ids=[],
+                )
+        except Exception:
+            self.fail("non-scalar model attributes must be recorded as unknown, not serialized recursively")
+        self.assertIsNone(output.result["protocol"]["model"]["epsilon"])
+        self.assertIsNone(output.result["protocol"]["model"]["prototype_activation_function"])
 
     def test_discovery_yields_only_validated_uuid_records(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):

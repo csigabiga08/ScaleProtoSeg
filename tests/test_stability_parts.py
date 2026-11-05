@@ -23,6 +23,63 @@ def latest_record(root):
 
 
 class StabilityPartsTests(unittest.TestCase):
+    def test_loaded_model_protocol_records_epsilon_and_separates_noise_seed(self):
+        class DatasetReached(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
+            root = Path(temporary)
+            checkpoint = root / "model" / "checkpoints" / "push_last.pth"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b"fixture checkpoint bytes")
+            catalog_root = root / "catalog"
+            catalog_root.mkdir()
+            model = MagicMock()
+            model.cuda.return_value = model
+            model.epsilon = 0.003
+            model.prototype_activation_function = "log"
+            with (
+                patch.dict(os.environ, {
+                    "RESULTS_DIR": str(root),
+                    "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
+                }),
+                patch.object(stability, "load_model_checkpoint", return_value=model),
+                patch.object(stability, "PatchClassificationDataset", side_effect=DatasetReached),
+            ):
+                with self.assertRaises(DatasetReached):
+                    stability.run_stability("model", "push", "pascal", seed=41)
+            bundle = next((catalog_root / "measurements").iterdir())
+            result = json.loads((bundle / "result.json").read_text())
+            self.assertEqual(result["protocol"]["model"]["epsilon"], 0.003)
+            self.assertEqual(result["protocol"]["stability"]["seed"], 41)
+            self.assertEqual(result["parameters"]["seed"], 41)
+            self.assertNotIn("seed", result["model"])
+            self.assertIsNone(result["model"]["training_seed"])
+
+    def test_stability_observations_use_one_based_evaluator_class_ids(self):
+        import pandas as pd
+
+        from segmentation.analysis.metrics import stability
+
+        output = MagicMock()
+        max_parts = stability.MAX_PARTS_PASCAL
+        values = {f"part_{part_id}": 0 for part_id in range(max_parts + 1)}
+        values.update({f"noisy_part_{part_id}": 0 for part_id in range(max_parts + 1)})
+        values.update(proto_id=7, **{"class": "aeroplane", "img_id": "sample"})
+        paired = pd.DataFrame([values])
+        stability._add_observations(output, paired, {1: "aeroplane"}, max_parts)
+        observation = output.add_observation.call_args.kwargs
+        self.assertEqual(observation["class_id"], 2)
+
+        protocol = stability._protocol(
+            "pascal", {1: "aeroplane"}, stability.PASCAL_ID_MAPPING, max_parts,
+            quantile=0.8, std_dev=0.2, seed=41, official_parts_only=False,
+            require_semantic_match=False, exclude_background_centroid=False,
+        )
+        self.assertEqual(protocol["classes"]["id_convention"]["model_class_index"], "evaluation_class_id - 1")
+        self.assertEqual(protocol["classes"]["evaluation_class_id_to_label"], {"2": "aeroplane"})
+        self.assertEqual(protocol["stability"]["seed"], 41)
+
     def test_output_directory_cli_option_is_removed(self):
         self.assertNotIn("output_dir", inspect.signature(stability.run_stability).parameters)
         with patch.object(stability, "load_model_checkpoint") as load:
