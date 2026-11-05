@@ -42,6 +42,59 @@ class MetricCatalogTests(unittest.TestCase):
             protocol={
                 "version": 1,
                 "metric": "consistency",
+                "activation": {
+                    "prototype_distance_activation": "log",
+                    "prototype_activation_function": "log",
+                    "normalization_mean": [0.485, 0.456, 0.406],
+                    "normalization_std": [0.229, 0.224, 0.225],
+                    "resize_interpolation": "cv2.INTER_NEAREST",
+                    "quantile_support": "semantic-class mask",
+                    "quantile_interpolation": "torch.quantile linear",
+                    "active_comparison": "strictly greater than quantile",
+                    "quantile_class_mask": "semantic class mask",
+                },
+                "centroids": {
+                    "component_rule": "OpenCV 8-connected components, rounded centroids",
+                    "background_component_centroid_included": True,
+                    "exclude_background_centroid": False,
+                },
+                "parts": {
+                    "valid_part_ids": [1, 2, 3],
+                    "maximum_part_id": 3,
+                    "mapping_identity": {"status": "unknown", "reason": "not supplied in fixture"},
+                    "class_dependent_part_definitions": None,
+                    "annotation_provenance": "unknown",
+                },
+                "classes": {
+                    "id_convention": {"model_class_index": "evaluation_class_id - 1"},
+                    "evaluation_class_id_to_label": {"2": "aeroplane"},
+                    "ignored_or_void_evaluation_class_id": 0,
+                    "background_evaluation_class_id": 1,
+                    "excluded_evaluation_class_ids": [1],
+                },
+                "consistency": {
+                    "threshold": 0.8,
+                    "strict_comparison": "mean part presence > threshold",
+                    "prototype_class_consistent": "any part flag is one",
+                    "aggregation": "unweighted mean over class/prototype rows",
+                },
+                "model": {"epsilon": None, "prototype_activation_function": None},
+                "input": {
+                    "source": "cached validation image",
+                    "resolution": "native resolution",
+                    "normalization": {
+                        "conversion": "PIL RGB uint8 to tensor in [0, 1]",
+                        "mean": [0.485, 0.456, 0.406],
+                        "std": [0.229, 0.224, 0.225],
+                    },
+                },
+                "prototype_selection": {
+                    "class_identity_rule": "evaluation_class_id - 1",
+                    "excluded_evaluation_class_ids": [1],
+                    "grouping_active": False,
+                    "group_nonzero_rule": "nonzero group projection",
+                    "group_intersection_rule": "no grouping-checkpoint filter",
+                },
                 "observation_columns": ["part_1", "part_2", "part_3"],
             },
             **parameters,
@@ -206,14 +259,99 @@ class MetricCatalogTests(unittest.TestCase):
             result_path.write_text(json.dumps(original))
             self.assertEqual(load_measurement(output.path)["status"], "complete")
 
+    def test_completed_record_rejects_missing_checkpoint_identity_even_with_declared_gap(self):
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            output.set_candidates([])
+            output.finish(value=0.0, numerator=0, denominator=1)
+            result_path = output.path / "result.json"
+            original = json.loads(result_path.read_text())
+            for identity_field in ("path", "bytes", "sha256", "status"):
+                with self.subTest(identity_field=identity_field):
+                    result = json.loads(json.dumps(original))
+                    result["model"]["inputs"]["prototype_checkpoint"].pop(identity_field)
+                    result["provenance_quality"]["missing_fields"].append("prototype_checkpoint SHA-256")
+                    result_path.write_text(json.dumps(result))
+                    with self.assertRaisesRegex(CatalogError, "checkpoint identity"):
+                        load_measurement(output.path)
+            result_path.write_text(json.dumps(original))
+
+    def test_completed_record_accepts_checkpoint_identity_only_when_unknown_is_justified(self):
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            output.set_candidates([])
+            output.finish(value=0.0, numerator=0, denominator=1)
+            result_path = output.path / "result.json"
+            result = json.loads(result_path.read_text())
+            identity = result["model"]["inputs"]["prototype_checkpoint"]
+            identity.update(
+                bytes=None,
+                sha256=None,
+                status="unknown",
+                reason="checkpoint source was unavailable to the measurement process",
+            )
+            result["provenance_quality"]["missing_fields"].append("prototype_checkpoint SHA-256")
+            result_path.write_text(json.dumps(result))
+            self.assertEqual(load_measurement(output.path)["status"], "complete")
+
+    def test_completed_record_rejects_missing_expanded_protocol_sections(self):
+        protocol_sections = (
+            "activation", "centroids", "parts", "classes", "consistency",
+            "model", "input", "prototype_selection",
+        )
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            output.set_candidates([])
+            output.finish(value=0.0, numerator=0, denominator=1)
+            result_path = output.path / "result.json"
+            original = json.loads(result_path.read_text())
+            for section in protocol_sections:
+                with self.subTest(section=section):
+                    result = json.loads(json.dumps(original))
+                    result["protocol"].pop(section)
+                    result["provenance_quality"]["missing_fields"] = []
+                    result_path.write_text(json.dumps(result))
+                    with self.assertRaisesRegex(CatalogError, "protocol"):
+                        load_measurement(output.path)
+            result_path.write_text(json.dumps(original))
+
+    def test_completed_record_rejects_minimal_protocol_without_declared_gaps(self):
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            output.set_candidates([])
+            output.finish(value=0.0, numerator=0, denominator=1)
+            result_path = output.path / "result.json"
+            result = json.loads(result_path.read_text())
+            result["protocol"] = {
+                "version": 1,
+                "metric": "consistency",
+                "observation_columns": ["part_1"],
+            }
+            result["provenance_quality"]["missing_fields"] = []
+            result_path.write_text(json.dumps(result))
+            with self.assertRaisesRegex(CatalogError, "protocol"):
+                load_measurement(output.path)
+
+    def test_early_failed_record_does_not_require_completed_protocol_or_checkpoint_identity(self):
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            output.fail(RuntimeError("checkpoint failed before model loading"))
+            result_path = output.path / "result.json"
+            result = json.loads(result_path.read_text())
+            result["model"]["inputs"] = {}
+            result["protocol"] = {"version": 1, "metric": "consistency", "observation_columns": ["part_1"]}
+            result["provenance_quality"]["missing_fields"] = []
+            result_path.write_text(json.dumps(result))
+            self.assertEqual(load_measurement(output.path)["status"], "failed")
+
     def test_explicit_unknown_provenance_is_valid_and_noise_seed_is_not_model_seed(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output(seed=41)
-            output.result["protocol"]["model"] = {"epsilon": None}
-            output.result["protocol"]["parts"] = {
-                "mapping_identity": None,
-                "annotation_provenance": "unknown",
-            }
+            output.result["protocol"]["model"].update(epsilon=None)
+            output.result["protocol"]["parts"].update(
+                mapping_identity={"status": "unknown", "reason": "not available in this fixture"},
+                annotation_provenance="unknown",
+            )
             output.result["provenance_quality"]["missing_fields"].append("model epsilon")
             output.set_candidates([])
             output.finish(value=0.0, numerator=0, denominator=1)

@@ -153,11 +153,19 @@ def _file_identity(path, cache):
             except OSError as error:
                 cache[absolute] = {
                     "path": absolute,
+                    "bytes": None,
+                    "sha256": None,
                     "status": "unreadable",
                     "error": str(error)[:200],
                 }
         else:
-            cache[absolute] = {"path": absolute, "status": "missing"}
+            cache[absolute] = {
+                "path": absolute,
+                "bytes": None,
+                "sha256": None,
+                "status": "missing",
+                "reason": "Input file does not exist at measurement initialization.",
+            }
     return dict(cache[absolute])
 
 
@@ -352,12 +360,20 @@ class MetricOutput:
         annotation_provenance = "unknown"
         if self.data_type == "cityscapes":
             mapping_file = Path(__file__).resolve().parents[3] / "segmentation" / "data" / "cityscapes_parts.py"
+            human_parts = {"1": "torso", "2": "head", "3": "arm", "4": "leg"}
+            vehicle_parts = {
+                "1": "window",
+                "2": "wheel",
+                "3": "light",
+                "4": "license plate",
+                "5": "chassis",
+            }
             definitions = {
-                "person": {"semantic_ids": [24, 25], "part_ids": [1, 2, 3, 4]},
-                "rider": {"semantic_ids": [24, 25], "part_ids": [1, 2, 3, 4]},
-                "car": {"semantic_ids": [26, 27, 28], "part_ids": [1, 2, 3, 4, 5]},
-                "truck": {"semantic_ids": [26, 27, 28], "part_ids": [1, 2, 3, 4, 5]},
-                "bus": {"semantic_ids": [26, 27, 28], "part_ids": [1, 2, 3, 4, 5]},
+                "person": {"semantic_ids": [24], "part_id_to_name": human_parts},
+                "rider": {"semantic_ids": [25], "part_id_to_name": human_parts},
+                "car": {"semantic_ids": [26], "part_id_to_name": vehicle_parts},
+                "truck": {"semantic_ids": [27], "part_id_to_name": vehicle_parts},
+                "bus": {"semantic_ids": [28], "part_id_to_name": vehicle_parts},
             }
             mapping_identity = _file_identity(mapping_file, self._input_hash_cache)
             mapping_identity["identity_kind"] = "official Cityscapes filter implementation"

@@ -106,6 +106,40 @@ def _integer(value, field):
     return parsed
 
 
+def _validate_checkpoint_identity(role, identity, missing_fields):
+    required = ("path", "bytes", "sha256", "status")
+    if not isinstance(identity, dict) or any(field not in identity for field in required):
+        raise CatalogError(f"Completed measurement has incomplete checkpoint identity for {role}")
+    if not isinstance(identity["path"], str) or not identity["path"]:
+        raise CatalogError(f"Completed measurement has invalid checkpoint identity path for {role}")
+    if identity["status"] == "available":
+        if (
+            not isinstance(identity["bytes"], int)
+            or identity["bytes"] < 0
+            or not isinstance(identity["sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", identity["sha256"])
+        ):
+            raise CatalogError(f"Completed measurement has incomplete checkpoint identity for {role}")
+        return
+    if identity["status"] not in ("missing", "unreadable", "unknown"):
+        raise CatalogError(f"Completed measurement has invalid checkpoint identity status for {role}")
+    justification = identity.get("reason") or identity.get("error")
+    if (
+        identity["bytes"] is not None
+        or identity["sha256"] is not None
+        or not isinstance(justification, str)
+        or not justification.strip()
+        or f"{role} SHA-256" not in missing_fields
+    ):
+        raise CatalogError(f"Completed measurement has unjustified unknown checkpoint identity for {role}")
+
+
+def _require_protocol_fields(protocol, section, fields):
+    values = protocol.get(section)
+    if not isinstance(values, dict) or any(field not in values for field in fields):
+        raise CatalogError(f"Completed measurement is missing native protocol section {section}")
+
+
 def validate_result(result):
     """Validate the versioned metadata envelope without importing model dependencies."""
     if not isinstance(result, dict) or result.get("schema_version") != SCHEMA_VERSION:
@@ -129,7 +163,7 @@ def validate_result(result):
             raise CatalogError("Terminal measurement is missing native model fields")
         if "seed" in model:
             raise CatalogError("Metric parameter seeds must not be stored as model seed")
-        if not isinstance(model["inputs"], dict) or not model["inputs"]:
+        if not isinstance(model["inputs"], dict):
             raise CatalogError("Terminal measurement is missing model inputs")
         dataset = result["dataset"]
         if any(key not in dataset for key in ("name", "split", "identity")):
@@ -159,6 +193,68 @@ def validate_result(result):
             or not isinstance(provenance_quality.get("warnings"), list)
         ):
             raise CatalogError("Terminal measurement is missing provenance quality metadata")
+        if result["status"] == "complete":
+            if not model["inputs"]:
+                raise CatalogError("Completed measurement is missing model inputs")
+            missing_fields = provenance_quality["missing_fields"]
+            _validate_checkpoint_identity(
+                "prototype_checkpoint", model["inputs"].get("prototype_checkpoint"), missing_fields
+            )
+            for role, identity in model["inputs"].items():
+                if role != "prototype_checkpoint":
+                    _validate_checkpoint_identity(role, identity, missing_fields)
+
+            for section, fields in (
+                ("activation", (
+                    "prototype_distance_activation", "prototype_activation_function",
+                    "normalization_mean", "normalization_std", "resize_interpolation",
+                    "quantile_support", "quantile_interpolation", "active_comparison",
+                    "quantile_class_mask",
+                )),
+                ("centroids", (
+                    "component_rule", "background_component_centroid_included",
+                    "exclude_background_centroid",
+                )),
+                ("parts", (
+                    "valid_part_ids", "maximum_part_id", "mapping_identity",
+                    "class_dependent_part_definitions", "annotation_provenance",
+                )),
+                ("classes", (
+                    "id_convention", "evaluation_class_id_to_label",
+                    "ignored_or_void_evaluation_class_id", "background_evaluation_class_id",
+                    "excluded_evaluation_class_ids",
+                )),
+                ("model", ("epsilon", "prototype_activation_function")),
+                ("input", ("source", "resolution", "normalization")),
+                ("prototype_selection", (
+                    "class_identity_rule", "excluded_evaluation_class_ids", "grouping_active",
+                    "group_nonzero_rule", "group_intersection_rule",
+                )),
+            ):
+                _require_protocol_fields(protocol, section, fields)
+            if not isinstance(protocol["parts"]["mapping_identity"], dict):
+                raise CatalogError("Completed measurement protocol is missing its part mapping identity")
+            for section, fields in (
+                ("normalization", ("conversion", "mean", "std")),
+            ):
+                _require_protocol_fields(protocol["input"], section, fields)
+            metric_section = "consistency" if result["metric"] == "consistency" else (
+                "stability" if result["metric"] == "stability" else None
+            )
+            if metric_section is None:
+                raise CatalogError(f"Unsupported native metric protocol: {result['metric']}")
+            metric_fields = (
+                (
+                    "threshold", "strict_comparison", "prototype_class_consistent", "aggregation",
+                )
+                if metric_section == "consistency"
+                else (
+                    "standard_deviation", "seed", "noise_distribution", "noise_magnitude",
+                    "noise_injection_space", "repetitions", "aggregation",
+                    "missing_value_comparison",
+                )
+            )
+            _require_protocol_fields(protocol, metric_section, metric_fields)
         score = result["scores"].get(result["metric"])
         if not isinstance(score, dict) or score.get("unit") != "fraction":
             raise CatalogError("A terminal measurement must contain its fractional metric score")
