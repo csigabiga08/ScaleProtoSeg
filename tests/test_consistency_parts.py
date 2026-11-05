@@ -1,6 +1,8 @@
 """Check runtime part selection without requiring GPU inference."""
 
+import json
 import os
+import csv
 from pathlib import Path
 import tempfile
 import unittest
@@ -13,6 +15,20 @@ from PIL import Image
 
 from segmentation.analysis.metrics import consistency
 from segmentation.data.cityscapes_parts import filter_official_parts
+
+
+def latest_record(root):
+    bundles = sorted((Path(root) / "measurements").iterdir(), key=lambda path: path.stat().st_mtime_ns)
+    return bundles[-1], json.loads((bundles[-1] / "result.json").read_text())
+
+
+def prepare_run(root):
+    checkpoint = root / "model" / "checkpoints" / "push_last.pth"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"fixture checkpoint bytes")
+    catalog_root = root / "catalog"
+    catalog_root.mkdir()
+    return catalog_root
 
 
 class ConsistencyPartsTests(unittest.TestCase):
@@ -29,8 +45,9 @@ class ConsistencyPartsTests(unittest.TestCase):
             filter_official_parts(np.array([[24]]), np.array([[1, 5]]))
 
     def test_evaluator_switches_modes_without_changing_cache(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
             root = Path(tmp)
+            catalog_root = prepare_run(root)
             semantic_dir = root / "annotations" / "val"
             part_dir = root / "annotations_PIDS" / "val"
             native_dir = root / "annotations_SIDS" / "val"
@@ -52,7 +69,10 @@ class ConsistencyPartsTests(unittest.TestCase):
             dataset.convert_targets = np.vectorize(consistency.CITYSCAPES_19_EVAL_CATEGORIES.get)
             observation = [np.nan, 0, 0, 0, 1, np.nan, 0, "person", "sample"]
             with (
-                patch.dict(os.environ, {"RESULTS_DIR": str(root)}),
+                patch.dict(os.environ, {
+                    "RESULTS_DIR": str(root),
+                    "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
+                }),
                 patch.object(consistency, "load_model_checkpoint"),
                 patch.object(consistency, "PatchClassificationDataset", return_value=dataset),
                 patch.object(consistency, "part_intersect", return_value=({}, [observation])) as intersect,
@@ -60,9 +80,9 @@ class ConsistencyPartsTests(unittest.TestCase):
                 # The default mode must work even without an SIDS cache.
                 consistency.run_consistency("model", "push", "cityscapes")
                 np.testing.assert_array_equal(intersect.call_args.args[2], original_parts)
-                output = root / "model" / "metrics" / "push"
-                score_path = output / "consistency_score_th_0.8_qt_0.8.txt"
-                unfiltered_score = score_path.read_bytes()
+                unfiltered_bundle, unfiltered = latest_record(catalog_root)
+                self.assertEqual(unfiltered["status"], "complete")
+                unfiltered_score = unfiltered["scores"]["consistency"]["value"]
 
                 with self.assertRaises(FileNotFoundError):
                     consistency.run_consistency("model", "push", "cityscapes", official_parts_only=True)
@@ -70,8 +90,11 @@ class ConsistencyPartsTests(unittest.TestCase):
                 np.save(native_dir / "sample.npy", [[24, 24, 25, 26, 31]])
                 consistency.run_consistency("model", "push", "cityscapes", official_parts_only=True)
                 np.testing.assert_array_equal(intersect.call_args.args[2], [[4, -1, -1, 5, -1]])
-                self.assertTrue((output / "official_parts" / score_path.name).is_file())
-                self.assertEqual(score_path.read_bytes(), unfiltered_score)
+                filtered_bundle, filtered = latest_record(catalog_root)
+                self.assertEqual(filtered["status"], "complete")
+                self.assertTrue(filtered["protocol"]["parts"]["official_parts_only"])
+                self.assertEqual(filtered["scores"]["consistency"]["value"], unfiltered_score)
+                self.assertNotEqual(filtered_bundle, unfiltered_bundle)
                 self.assertEqual(part_path.read_bytes(), original_bytes)
 
     def test_official_flag_rejects_pascal_before_loading_model(self):
@@ -81,8 +104,9 @@ class ConsistencyPartsTests(unittest.TestCase):
             load_model.assert_not_called()
 
     def test_pascal_semantic_match_cli_preserves_legacy_results_and_cache(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
             root = Path(tmp)
+            catalog_root = prepare_run(root)
             semantic_dir = root / "annotations" / "val"
             part_dir = root / "annotations_PIDS" / "val"
             native_dir = root / "annotations_SIDS" / "val"
@@ -106,7 +130,10 @@ class ConsistencyPartsTests(unittest.TestCase):
             observation[3] = 1
             observation += [0, "person", "sample"]
             with (
-                patch.dict(os.environ, {"RESULTS_DIR": str(root)}),
+                patch.dict(os.environ, {
+                    "RESULTS_DIR": str(root),
+                    "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
+                }),
                 patch.object(consistency, "load_model_checkpoint"),
                 patch.object(consistency, "PatchClassificationDataset", return_value=dataset),
                 patch.object(consistency, "part_intersect", return_value=({}, [observation])) as intersect,
@@ -114,8 +141,8 @@ class ConsistencyPartsTests(unittest.TestCase):
                 # Legacy mode needs no panoptic semantic cache.
                 consistency.run_consistency("model", "push", "pascal")
                 np.testing.assert_array_equal(intersect.call_args.args[2], original_parts)
-                output = root / "model" / "metrics" / "push"
-                legacy_files = {path.name: path.read_bytes() for path in output.iterdir()}
+                legacy_bundle, legacy_record = latest_record(catalog_root)
+                legacy_score = legacy_record["scores"]["consistency"]["value"]
 
                 with self.assertRaises(FileNotFoundError):
                     consistency.run_consistency("model", "push", "pascal", require_semantic_match=True)
@@ -129,9 +156,11 @@ class ConsistencyPartsTests(unittest.TestCase):
                 )
                 np.testing.assert_array_equal(intersect.call_args.args[2], [[0, 3, 3, 0, 0, 0, 2, 0]])
                 np.testing.assert_array_equal(intersect.call_args.args[1], [[16, 16, 3, 1, 0, 16, 21, 16]])
-                for name, contents in legacy_files.items():
-                    self.assertEqual((output / name).read_bytes(), contents)
-                    self.assertTrue((output / "semantic_match" / name).is_file())
+                semantic_bundle, semantic_record = latest_record(catalog_root)
+                self.assertEqual(semantic_record["status"], "complete")
+                self.assertTrue(semantic_record["protocol"]["parts"]["require_semantic_match"])
+                self.assertEqual(semantic_record["scores"]["consistency"]["value"], legacy_score)
+                self.assertNotEqual(semantic_bundle, legacy_bundle)
                 self.assertEqual(part_path.read_bytes(), original_bytes)
 
                 argh.dispatch_command(
@@ -139,9 +168,8 @@ class ConsistencyPartsTests(unittest.TestCase):
                     argv=["model", "push", "pascal", "--require-semantic-match", "--exclude-background-centroid"],
                 )
                 self.assertTrue(intersect.call_args.kwargs["exclude_background_centroid"])
-                self.assertTrue(
-                    (output / "semantic_match" / "foreground_centroids" / "consistency_score_th_0.8_qt_0.8.txt").is_file()
-                )
+                _, foreground_record = latest_record(catalog_root)
+                self.assertTrue(foreground_record["protocol"]["centroids"]["exclude_background_centroid"])
 
                 # Reject shapes which NumPy would otherwise silently broadcast.
                 np.save(native_dir / "sample.npy", [[15]])
@@ -180,6 +208,85 @@ class ConsistencyPartsTests(unittest.TestCase):
 
         self.assertEqual(legacy[0][1], 1)
         self.assertEqual(foreground[0][1], 0)
+
+    def test_population_tracks_missing_annotations_and_empty_observations(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
+            root = Path(tmp)
+            catalog_root = prepare_run(root)
+            semantic_dir = root / "annotations" / "val"
+            part_dir = root / "annotations_PIDS" / "val"
+            semantic_dir.mkdir(parents=True)
+            part_dir.mkdir(parents=True)
+            np.save(semantic_dir / "empty.npy", [[1]])
+            np.save(part_dir / "empty.npy", [[1]])
+            image_path = root / "empty.png"
+            Image.new("RGB", (1, 1)).save(image_path)
+            dataset = MagicMock()
+            dataset.__len__.return_value = 2
+            dataset.img_ids = ["missing", "empty"]
+            dataset.annotations_dir = str(semantic_dir)
+            dataset.get_img_path.return_value = str(image_path)
+            dataset.convert_targets.side_effect = lambda value: value
+            with (
+                patch.dict(os.environ, {
+                    "RESULTS_DIR": str(root),
+                    "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
+                }),
+                patch.object(consistency, "load_model_checkpoint"),
+                patch.object(consistency, "PatchClassificationDataset", return_value=dataset),
+                patch.object(consistency, "part_intersect", return_value=({}, [])),
+            ):
+                consistency.run_consistency("model", "push", "pascal")
+
+            bundle, record = latest_record(catalog_root)
+            self.assertEqual(record["status"], "complete")
+            self.assertIsNone(record["scores"]["consistency"]["value"])
+            self.assertEqual(
+                record["scores"]["consistency"]["reason"],
+                "no eligible class/prototype observations",
+            )
+            self.assertEqual(record["population"]["excluded"], 1)
+            self.assertEqual(record["population"]["processed_no_observations"], 1)
+            with (bundle / "samples.csv").open(newline="") as stream:
+                samples = list(csv.DictReader(stream))
+            self.assertEqual(
+                [(row["sample_id"], row["outcome"]) for row in samples],
+                [("missing", "excluded"), ("empty", "processed_no_observations")],
+            )
+
+    def test_processing_error_publishes_failed_and_unattempted_candidates(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
+            root = Path(tmp)
+            catalog_root = prepare_run(root)
+            semantic_dir = root / "annotations" / "val"
+            part_dir = root / "annotations_PIDS" / "val"
+            semantic_dir.mkdir(parents=True)
+            part_dir.mkdir(parents=True)
+            (part_dir / "bad.npy").write_bytes(b"not a numpy array")
+            dataset = MagicMock()
+            dataset.__len__.return_value = 2
+            dataset.img_ids = ["bad", "later"]
+            dataset.annotations_dir = str(semantic_dir)
+            dataset.get_img_path.return_value = str(root / "unused.png")
+            with (
+                patch.dict(os.environ, {
+                    "RESULTS_DIR": str(root),
+                    "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
+                }),
+                patch.object(consistency, "load_model_checkpoint"),
+                patch.object(consistency, "PatchClassificationDataset", return_value=dataset),
+            ):
+                with self.assertRaises(ValueError):
+                    consistency.run_consistency("model", "push", "pascal")
+
+            bundle, record = latest_record(catalog_root)
+            self.assertEqual(record["status"], "failed")
+            self.assertEqual(record["population"]["failed"], 1)
+            self.assertEqual(record["population"]["not_attempted"], 1)
+            with (bundle / "samples.csv").open(newline="") as stream:
+                samples = list(csv.DictReader(stream))
+            self.assertEqual([row["outcome"] for row in samples], ["failed", "not_attempted"])
+            self.assertIn("ValueError", samples[0]["reason"])
 
 
 if __name__ == "__main__":

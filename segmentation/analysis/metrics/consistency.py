@@ -46,6 +46,86 @@ def proto_filter(ppnet: PPNetMultiScale) -> List[int]:
     return tot_list_proto_ids
 
 
+def _selected_prototypes(model, allowed_ids, filtered_classes):
+    identity = getattr(model, "prototype_class_identity", None)
+    if not isinstance(identity, torch.Tensor) or identity.ndim != 2:
+        return []
+    identity = identity.detach().cpu().numpy()
+    allowed = None if allowed_ids is None else set(int(value) for value in allowed_ids)
+    selected = []
+    for class_index in range(identity.shape[1]):
+        if class_index + 1 in filtered_classes:
+            continue
+        selected.extend(
+            int(proto_id) for proto_id in np.flatnonzero(identity[:, class_index])
+            if allowed is None or int(proto_id) in allowed
+        )
+    return selected
+
+
+def _protocol(metric, data_type, class_map, semantic_map, max_parts, *, quantile, threshold,
+              official_parts_only, require_semantic_match, exclude_background_centroid):
+    return {
+        "version": 1,
+        "metric": metric,
+        "quantile": quantile,
+        "activation": {
+            "prototype_distance_activation": "log((distance + 1) / (distance + epsilon))",
+            "prototype_activation_function": "log",
+            "normalization_mean": [0.485, 0.456, 0.406],
+            "normalization_std": [0.229, 0.224, 0.225],
+            "resize_interpolation": "cv2.INTER_NEAREST",
+            "quantile_support": "pixels in each evaluated semantic-class mask",
+            "quantile_interpolation": "torch.quantile linear",
+            "active_comparison": "activation strictly greater than quantile",
+            "quantile_class_mask": "semantic class mask",
+        },
+        "centroids": {
+            "component_rule": "OpenCV 8-connected components, rounded centroids",
+            "background_component_centroid_included": not exclude_background_centroid,
+            "exclude_background_centroid": exclude_background_centroid,
+        },
+        "parts": {
+            "valid_part_ids": list(range(1, max_parts + 1)),
+            "maximum_part_id": max_parts,
+            "part_mapping_identity": f"{data_type} preprocessed part annotation",
+            "official_parts_only": official_parts_only,
+            "require_semantic_match": require_semantic_match,
+            "missing_part_annotation": "candidate excluded before processing",
+        },
+        "classes": {
+            "semantic_id_to_evaluation_id": semantic_map,
+            "evaluation_class_id_to_label": {str(key): value for key, value in class_map.items()},
+            "background_id": 0,
+            "excluded_evaluation_ids": list(PASCAL_FILTER_CLASS) if data_type == "pascal" else [],
+        },
+        "consistency": {
+            "threshold": threshold,
+            "strict_comparison": "mean part presence > threshold",
+            "prototype_class_consistent": "any part flag is one",
+            "aggregation": "unweighted mean over class/prototype rows",
+        },
+        "observation_columns": [f"part_{part_id}" for part_id in range(max_parts + 1)],
+        "unavailable_part_value": "blank",
+    }
+
+
+def _add_observations(output, rows, class_map, max_parts):
+    label_to_id = {label: class_id for class_id, label in class_map.items()}
+    for row in rows:
+        class_name = row[max_parts + 2]
+        observation = {
+            "sample_id": row[max_parts + 3],
+            "class_id": label_to_id[class_name],
+            "prototype_id": int(row[max_parts + 1]),
+            "repetition": 0,
+        }
+        observation.update({
+            f"part_{part_id}": row[part_id] for part_id in range(max_parts + 1)
+        })
+        output.add_observation(**observation)
+
+
 def run_consistency(
     model_name: str,
     training_phase: str,
@@ -56,7 +136,6 @@ def run_consistency(
     group_name: Optional[str] = None,
     checkpoint: Optional[str] = None,
     group_checkpoint: Optional[str] = None,
-    output_dir: Optional[str] = None,
     official_parts_only: bool = False,
     require_semantic_match: bool = False,
     exclude_background_centroid: bool = False,
@@ -74,14 +153,11 @@ def run_consistency(
             the training-phase filename. Grouped models also supply their own prototype filter.
         group_checkpoint (str, optional): Explicit checkpoint for prototype filtering,
             overriding group_name and the evaluated model's own grouping.
-        output_dir (str, optional): Exact output directory. By default a configuration
-            folder such as metrics-allparts-background is created in the checkpoint's
-            model directory. Parameters and a run description are saved per filename.
         official_parts_only (bool): Keep only official Cityscapes semantic/part pairs.
-            Defaults to False. Filtered results go in a metrics-filteredparts-* folder.
+            Defaults to False.
         require_semantic_match (bool): For Pascal, keep positive parts only where
             panoptic SIDs match the original VOC foreground class IDs, as in ReProSeg.
-            Defaults to False (legacy behavior). Filtered results go in metrics-filteredparts-*.
+            Defaults to False (legacy behavior).
         exclude_background_centroid (bool): Check only foreground part centroids.
             Defaults to False (legacy behavior). Results are labelled foreground.
 
@@ -126,15 +202,6 @@ def run_consistency(
     else:
         raise NotImplementedError(f"Data type {data_type} not supported")
 
-    log(f"Loading model from {checkpoint_path}")
-    log(f"Part labels: {'official Cityscapes parts only' if official_parts_only else 'all decoded part IDs'}")
-    if data_type == "pascal":
-        log(f"Pascal semantic agreement: {'required' if require_semantic_match else 'not required (legacy)'}")
-    log(f"Part centroids: {'foreground only' if exclude_background_centroid else 'including background (legacy)'}")
-    ppnet = load_model_checkpoint(checkpoint_path)
-    ppnet = ppnet.cuda()
-    ppnet.eval()
-
     checkpoint_path_group = None
     if group_checkpoint is not None or group_name is not None:
         if group_checkpoint is not None:
@@ -142,101 +209,136 @@ def run_consistency(
         else:
             group_path = os.path.join(os.environ["RESULTS_DIR"], group_name)
             checkpoint_path_group = os.path.join(group_path, "checkpoints/th-0.05-nopush-group_last.pth")
-        log(f"Loading prototype filter from {checkpoint_path_group}")
-        ppnet_group = load_model_checkpoint(checkpoint_path_group)
-        ppnet_group.eval()
-        proto_ids = proto_filter(ppnet_group)
-    elif checkpoint is not None and hasattr(ppnet, "group_projection"):
-        checkpoint_path_group = checkpoint_path
-        proto_ids = proto_filter(ppnet)
-    else:
-        proto_ids = None
 
+    protocol = _protocol(
+        "consistency", data_type, cls2name, ID_MAPPING, MAX_PARTS,
+        quantile=quantile, threshold=threshold, official_parts_only=official_parts_only,
+        require_semantic_match=require_semantic_match,
+        exclude_background_centroid=exclude_background_centroid,
+    )
     output = MetricOutput(
         "consistency", checkpoint_path, data_type, model_name=model_name,
-        training_phase=training_phase, quantile=quantile, threshold=threshold,
-        group_checkpoint=checkpoint_path_group, official_parts_only=official_parts_only,
+        training_phase=training_phase, protocol=protocol, quantile=quantile, threshold=threshold,
+        group_checkpoint=checkpoint_path_group,
+        official_parts_only=official_parts_only,
         require_semantic_match=require_semantic_match,
-        exclude_background_centroid=exclude_background_centroid, output_dir=output_dir,
+        exclude_background_centroid=exclude_background_centroid,
     )
-    output_path = str(output.path)
-    log(f"Results directory: {output_path}")
+    try:
+        log(f"Loading model from {checkpoint_path}")
+        log(f"Part labels: {'official Cityscapes parts only' if official_parts_only else 'all decoded part IDs'}")
+        if data_type == "pascal":
+            log(f"Pascal semantic agreement: {'required' if require_semantic_match else 'not required (legacy)'}")
+        log(f"Part centroids: {'foreground only' if exclude_background_centroid else 'including background (legacy)'}")
+        ppnet = load_model_checkpoint(checkpoint_path)
+        ppnet = ppnet.cuda()
+        ppnet.eval()
 
-    val_dataset = PatchClassificationDataset(  # TODO: Adapt to new dataset
-        data_type=data_type,
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225],
-        image_margin_size=0,
-        window_size=(513, 513),
-        only_19_from_cityscapes=(data_type == "cityscapes"),
-        scales=(0.5, 1.5),
-        split_key="val",
-        is_eval=True,
-        push_prototypes=True,
-    )
+        if checkpoint_path_group is not None:
+            log(f"Loading prototype filter from {checkpoint_path_group}")
+            if checkpoint_path_group == checkpoint_path:
+                ppnet_group = ppnet
+            else:
+                ppnet_group = load_model_checkpoint(checkpoint_path_group)
+            ppnet_group.eval()
+            proto_ids = proto_filter(ppnet_group)
+            if checkpoint_path_group == checkpoint_path:
+                output.register_input("group_checkpoint", checkpoint_path)
+        elif checkpoint is not None and hasattr(ppnet, "group_projection"):
+            checkpoint_path_group = checkpoint_path
+            proto_ids = proto_filter(ppnet)
+            output.register_input("group_checkpoint", checkpoint_path)
+        else:
+            proto_ids = None
+        selected_ids = _selected_prototypes(ppnet, proto_ids, FILTER_CLASS)
+        output.set_selected_prototype_ids(selected_ids)
+        output.update_model_metadata(architecture=type(ppnet).__name__)
 
-    output.record_dataset(val_dataset)
-    i = 0
-    tot_presence = []
-    for sample_id in tqdm(
-        range(len(val_dataset)), desc="Computing Consistency Score Validation", total=len(val_dataset)
-    ):
-
-        img_id = val_dataset.img_ids[sample_id]
-        img_path = val_dataset.get_img_path(img_id)
-
-        path_cls = Path(val_dataset.annotations_dir)
-        path_part = str(path_cls.parent) + f"_PIDS/{path_cls.name}"
-
-        # Attention for PASCAL only overlap
-        if not os.path.exists(os.path.join(path_part, img_id + ".npy")):
-            continue
-
-        part_ann = np.load(os.path.join(path_part, img_id + ".npy"))
-        if official_parts_only:
-            # Filter in memory using native SIDs; keep the cache usable by both modes.
-            sids_path = path_cls.parent.parent / "annotations_SIDS" / path_cls.name / f"{img_id}.npy"
-            part_ann = filter_official_parts(np.load(sids_path), part_ann)
-        cls_ann = np.load(os.path.join(val_dataset.annotations_dir, img_id + ".npy"))
-        if require_semantic_match:
-            sids_path = path_cls.parent.parent / "annotations_SIDS" / path_cls.name / f"{img_id}.npy"
-            sids = np.load(sids_path)
-            if sids.shape != cls_ann.shape or part_ann.shape != cls_ann.shape:
-                raise ValueError(f"Pascal semantic, part and SID annotations must have matching shapes: {img_id}")
-            # Compare native VOC IDs before convert_targets shifts 0..20 to 1..21.
-            valid = (sids == cls_ann) & (sids >= 1) & (sids <= 20) & (part_ann > 0)
-            part_ann = np.where(valid, part_ann, 0)
-        cls_ann = val_dataset.convert_targets(cls_ann)
-
-        with open(img_path, "rb") as f:
-            img = Image.open(f).convert("RGB")
-
-        _, part_presence_list = part_intersect(
-            img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile, proto_ids, FILTER_CLASS,
-            exclude_background_centroid=exclude_background_centroid,
+        val_dataset = PatchClassificationDataset(  # TODO: Adapt to new dataset
+            data_type=data_type,
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+            image_margin_size=0,
+            window_size=(513, 513),
+            only_19_from_cityscapes=(data_type == "cityscapes"),
+            scales=(0.5, 1.5),
+            split_key="val",
+            is_eval=True,
+            push_prototypes=True,
         )
 
-        tot_presence.extend(part_presence_list)
-        i += 1
+        output.record_dataset(val_dataset)
+        tot_presence = []
+        for sample_index in tqdm(
+            range(len(val_dataset)), desc="Computing Consistency Score Validation", total=len(val_dataset)
+        ):
 
-    part_columns = [f"part_{i}" for i in range(MAX_PARTS + 1)]
-    df_presence = pd.DataFrame(tot_presence, columns=part_columns + ["proto_id", "class", "img_id"])
-    df_presence.to_csv(output.file("part_presence", "csv"), index=False)
+            img_id = val_dataset.img_ids[sample_index]
+            img_path = val_dataset.get_img_path(img_id)
 
-    df_mean = df_presence.groupby(["class", "proto_id"])[part_columns].mean().reset_index()
-    df_flag = df_mean.copy()
-    df_flag[[f"part_{i}" for i in range(MAX_PARTS + 1)]] = df_flag[[f"part_{i}" for i in range(MAX_PARTS + 1)]].apply(
-        lambda x: (x > threshold).astype(int), axis=1
-    )
-    df_flag["is_consistent"] = df_flag[[f"part_{i}" for i in range(MAX_PARTS + 1)]].max(axis=1)
-    df_mean = df_mean.merge(df_flag[["proto_id", "is_consistent"]], on="proto_id")
-    df_mean.to_csv(output.file("part_presence_mean", "csv"), index=False)
-    consistency_score = df_mean.is_consistent.mean()
-    log(f"Consistency score: {consistency_score}")
+            path_cls = Path(val_dataset.annotations_dir)
+            path_part = str(path_cls.parent) + f"_PIDS/{path_cls.name}"
 
-    with output.file("consistency_score", "txt").open("w") as f:
-        f.write(f"{consistency_score}")
-    output.finish(consistency_score, i, len(df_presence))
+            if not os.path.exists(os.path.join(path_part, img_id + ".npy")):
+                output.mark_sample(img_id, "excluded", "missing_part_annotation")
+                continue
+
+            output.start_sample(img_id)
+            part_ann = np.load(os.path.join(path_part, img_id + ".npy"))
+            if official_parts_only:
+                sids_path = path_cls.parent.parent / "annotations_SIDS" / path_cls.name / f"{img_id}.npy"
+                part_ann = filter_official_parts(np.load(sids_path), part_ann)
+            cls_ann = np.load(os.path.join(val_dataset.annotations_dir, img_id + ".npy"))
+            if require_semantic_match:
+                sids_path = path_cls.parent.parent / "annotations_SIDS" / path_cls.name / f"{img_id}.npy"
+                sids = np.load(sids_path)
+                if sids.shape != cls_ann.shape or part_ann.shape != cls_ann.shape:
+                    raise ValueError(f"Pascal semantic, part and SID annotations must have matching shapes: {img_id}")
+                valid = (sids == cls_ann) & (sids >= 1) & (sids <= 20) & (part_ann > 0)
+                part_ann = np.where(valid, part_ann, 0)
+            cls_ann = val_dataset.convert_targets(cls_ann)
+
+            with open(img_path, "rb") as f:
+                img = Image.open(f).convert("RGB")
+
+            _, part_presence_list = part_intersect(
+                img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile, proto_ids, FILTER_CLASS,
+                exclude_background_centroid=exclude_background_centroid,
+            )
+
+            tot_presence.extend(part_presence_list)
+            _add_observations(output, part_presence_list, cls2name, MAX_PARTS)
+            output.complete_sample(img_id)
+
+        part_columns = [f"part_{i}" for i in range(MAX_PARTS + 1)]
+        df_presence = pd.DataFrame(tot_presence, columns=part_columns + ["proto_id", "class", "img_id"])
+
+        if df_presence.empty:
+            consistency_score = float("nan")
+            numerator = 0
+            denominator = 0
+        else:
+            df_mean = df_presence.groupby(["class", "proto_id"])[part_columns].mean().reset_index()
+            df_flag = df_mean.copy()
+            df_flag[part_columns] = df_flag[part_columns].apply(
+                lambda column: (column > threshold).astype(int), axis=1
+            )
+            df_flag["is_consistent"] = df_flag[part_columns].max(axis=1)
+            df_mean = df_mean.merge(df_flag[["proto_id", "is_consistent"]], on="proto_id")
+            consistency_score = df_mean.is_consistent.mean()
+            numerator = float(df_mean.is_consistent.sum())
+            denominator = int(len(df_mean))
+        log(f"Consistency score: {consistency_score}")
+
+        output.finish(
+            consistency_score,
+            numerator=numerator,
+            denominator=denominator,
+            reason="no eligible class/prototype observations" if not denominator else None,
+        )
+    except Exception as error:
+        output.fail(error)
+        raise
 
 
 @torch.no_grad()
