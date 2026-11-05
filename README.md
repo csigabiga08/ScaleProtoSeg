@@ -191,56 +191,34 @@ python -m segmentation.eval_test  <your_training_run_name> <training_stage> <bat
 python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> <data_type> --quantile <quantile> --threshold <threshold>
 ```
 
-### Consistency and stability result folders
+### Native consistency and stability measurements
 
-Both calculators save into one of four folders in the evaluated checkpoint's model
-directory. For `<model>/checkpoints/push_last.pth`, these folders are directly under
-`<model>/`; if the checkpoint is stored directly in a model directory, the folders
-are created there. Both metrics share the selected folder:
+Every invocation allocates a fresh UUID directory under the catalog root configured
+by `MEASUREMENT_CATALOG_ROOT`:
 
 ```text
-<model>/
-  checkpoints/
-    push_last.pth
-  metrics-allparts-background/
-  metrics-allparts-foreground/
-  metrics-filteredparts-background/
-  metrics-filteredparts-foreground/
+<catalog-root>/
+  measurements/<measurement-uuid>/
+    result.json
+    observations.csv
+    samples.csv
 ```
 
-Only folders for configurations that you actually run are created. Folder names
-contain only part selection and centroid selection. `background` means foreground
-part centroids **plus** OpenCV's background centroid. `foreground` means only actual
-part-component centroids. Existing results in older directories are left in place.
+Set `MEASUREMENT_CATALOG_ROOT` in the job environment or in this checkout's ignored
+`.env` file. The root must already exist and be writable; metrics do not fall back
+to `RESULTS_DIR`, and there is no `--output-dir` or catalog-root command-line option.
+`RESULTS_DIR` still locates stage-selected checkpoints and relative group names.
 
-Quantiles and thresholds are included in result filenames. Stability filenames
-include the noise standard deviation and seed. Filenames also identify the evaluated
-checkpoint and grouping filter, so different checkpoint/filter configurations can
-coexist in the same folder. For example, an ungrouped run writes:
-
-```text
-metrics-allparts-background/
-  consistency_score_th_0.8_qt_0.8_checkpoint_push_last_group_ungrouped.txt
-  part_presence_th_0.8_qt_0.8_checkpoint_push_last_group_ungrouped.csv
-  part_presence_mean_th_0.8_qt_0.8_checkpoint_push_last_group_ungrouped.csv
-  description_consistency_th_0.8_qt_0.8_checkpoint_push_last_group_ungrouped.json
-  stability_score_std_0.2_qt_0.8_seed_0_checkpoint_push_last_group_ungrouped.txt
-  tot_presence_stab_std_0.2_qt_0.8_seed_0_checkpoint_push_last_group_ungrouped.csv
-  description_stability_std_0.2_qt_0.8_seed_0_checkpoint_push_last_group_ungrouped.json
-```
-
-Grouped runs use `group_grouped-<identity>` instead of `group_ungrouped` in their
-filenames. The identity is computed from the resolved grouping checkpoint path;
-its full path is recorded in the description.
-
-Each run has its own `description_<metric>_<parameters>.json`, which records the
-exact checkpoint and grouping paths, filtering flags, quantile, threshold/noise/seed,
-Python and package versions, hostname and Slurm job ID, annotation location,
-image-order digest, and completion status. Completed runs also record the score
-and the number of evaluated images and observations. Descriptions for consistency,
-stability, and different quantiles coexist. Repeating an identical configuration
-uses the same filenames; use `--output-dir` with a separate folder to retain repeats.
-The scripts print the result directory in their log.
+`result.json` records schema version, run status, checkpoint identities and hashes,
+dataset identity coverage, the expanded metric protocol, selected and contributing
+prototype IDs, population counts, scores, source/package provenance and artifact
+hashes. It is first published as `running`, then atomically replaced with a terminal
+`complete` or `failed` record. A native completed bundle contains exactly the three
+files above. Observations use stable sample/class/prototype/repetition keys; blank
+consistency part values mean unavailable, while zero means an observed miss.
+Stability stores clean and noisy part vectors rather than derived equality flags.
+Candidate outcome rows distinguish excluded, empty, contributing, failed and
+not-attempted samples. Repeated configurations are separate measurements.
 
 Both calculators accept these part and centroid options:
 
@@ -261,18 +239,15 @@ Select an exact evaluated checkpoint with `--checkpoint` for consistency or
 `--checkpoint-path` for stability. Select a prototype-filter checkpoint using
 `--group-checkpoint /path/to/group.pth` on either calculator, or retain the existing
 `--group-name /path/to/group_run` option. Stability also accepts `--seed` (default 0).
-Use `--output-dir /exact/result/folder` to override the default model-level folder;
-parameterized result files and descriptions are still written there. `RESULTS_DIR`
-continues to locate stage-selected checkpoints and relative group names; it no longer
-selects the default result directory.
+Output directories are allocated automatically from `MEASUREMENT_CATALOG_ROOT`.
 
-From `~/ScaleProtoSeg-ssd`, submit a single-quantile Pascal stability job:
+After configuring a writable catalog root, submit a single-quantile Pascal stability job:
 
 ```bash
 sbatch --output="$PWD/stability-%j.out" scripts/run_metric.slurm \
   stability scaleproto_pascal push pascal \
-  --checkpoint-path /data/shared/protoseg/scaleproto_checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
-  --group-name /data/shared/protoseg/scaleproto_checkpoints/group_scaleproto_pascal \
+  --checkpoint-path /data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
+  --group-name /data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal \
   --quantile 0.8 --std-dev 0.2
 ```
 
@@ -282,18 +257,91 @@ To use Pascal semantic matching and foreground centroids, append
 ```bash
 sbatch --output="$PWD/consistency-%j.out" scripts/run_metric.slurm \
   consistency scaleproto_pascal push pascal \
-  --checkpoint /data/shared/protoseg/scaleproto_checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
-  --group-name /data/shared/protoseg/scaleproto_checkpoints/group_scaleproto_pascal \
+  --checkpoint /data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
+  --group-name /data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal \
   --quantile 0.8 --threshold 0.8
 ```
 
 The Slurm wrapper requests one GPU on TANK, eight CPUs, and 32 GB of memory.
 Override the node with `sbatch --nodelist=maxitank ...` when using that node's checkout
 and preprocessed data. `/data_ssd` storage can differ between nodes: the updated code
-and configured caches must be available on the node you select. The description's
-hostname and annotation path identify which environment was used.
+and configured caches must be available on the node you select. The result record's
+hostname and annotation paths identify which environment was used.
 
-For testing it is necessary to then properly arrange the output folder to match the benchmarks requirements online.
+### Querying and summarizing measurements
+
+The metadata-only catalog CLI uses the same `MEASUREMENT_CATALOG_ROOT` environment
+setting as the metric writers. Exported values take precedence over this checkout's
+ignored `.env`; `.env_template` contains a placeholder to replace locally. The
+Slurm wrapper uses the submit checkout from `SLURM_SUBMIT_DIR` (or `PWD`) unless
+`SCALEPROTOSEG_ROOT` is explicitly set, and runs `METRIC_PYTHON` when configured
+(otherwise `.venv/bin/python`).
+
+List and filter complete measurements without opening observation tables, checkpoints,
+or model code:
+
+```bash
+.venv/bin/python -m segmentation.analysis.metrics.catalog_cli list \
+  --metric consistency --dataset pascal --quantile 0.8 \
+  --variant protocol.consistency.threshold=0.8
+.venv/bin/python -m segmentation.analysis.metrics.catalog_cli filter \
+  --all-status --status failed --provenance-gap 'part annotation'
+```
+
+Running and failed measurements remain discoverable with `--all-status`; direct
+non-complete status filters also require that opt-in. Summaries default to complete
+records; finalized failed records may be inspected with `summarize --all-status`,
+but running records cannot be summarized. Unknown provenance and extension fields are
+retained in metadata and exported CSVs. Export a flat comparison table with the
+complete nested record preserved in `metadata_json`:
+
+```bash
+.venv/bin/python -m segmentation.analysis.metrics.catalog_cli export \
+  --metric consistency --output /path/to/analysis/consistency.csv
+```
+
+Validate a selected record, recompute its exact metric aggregates, or save derived
+summary tables outside the canonical catalog bundle:
+
+```bash
+.venv/bin/python -m segmentation.analysis.metrics.catalog_cli validate <measurement-id>
+.venv/bin/python -m segmentation.analysis.metrics.catalog_cli summarize <measurement-id> \
+  --output-dir /path/to/analysis/<measurement-id>
+```
+
+Consistency summaries use the recorded protocol version and aggregation rule:
+per-part means omit blank/NaN unavailable values, while observed zero remains a miss;
+consistency uses strict `mean > threshold` and weights class/prototype rows as the
+recorded evaluator does. Stability summaries compare paired clean/noisy part vectors
+and do not substitute missing values with zero. Unknown aggregation or comparison
+protocols are rejected rather than reinterpreted. The known historical evaluator
+profile is identified explicitly as `scaleprotoseg-v1`; its recorded aggregation
+descriptor must still match. Legacy records without complete
+candidate membership remain visible with explicit diagnostics; summaries use only
+available observation artifacts and do not invent excluded samples.
+
+### Catalog visualizations
+
+Plot explicit consistency measurement IDs; quantiles are not auto-selected and
+repeated attempts remain separate:
+
+```bash
+.venv/bin/python -m segmentation.analysis.metrics.catalog_cli plot \
+  <measurement-id-q70> <measurement-id-q80> \
+  --output-dir /path/to/analysis/consistency-figures
+```
+
+The command writes four conventional views (prototype/part heatmaps, per-class
+consistency, prototype maximum-part scores across quantiles, and usable-image
+support), individual PNG/PDF files, a combined PDF, and exact-value CSV tables.
+Comparisons require matching known checkpoint, dataset, and non-quantile protocol
+identities. Support sample sets are checked across selections; when they differ, the
+support view and CSV retain separate values per selected quantile/attempt. Derived
+exports are refused anywhere under canonical `measurements/` bundles.
+
+The view choices are conceptually informed by ReProSeg's consistency visualization
+methods. Its checked-out source had no license file, so these catalog plots are an
+independent implementation and do not import or copy that source.
 
 ## 🥇 Performance
 

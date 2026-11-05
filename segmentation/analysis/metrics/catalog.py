@@ -366,8 +366,23 @@ def validate_result(result):
     if not isinstance(result["artifacts"], dict) or not isinstance(result["scores"], dict):
         raise CatalogError("Measurement artifacts and scores must be objects")
     if result["status"] in ("complete", "failed"):
+        if result.get("origin") == "legacy":
+            if not isinstance(result["measurement_id"], str) or not result["measurement_id"]:
+                raise CatalogError("Legacy measurement is missing its identity")
+            if not isinstance(result["metric"], str) or not result["metric"]:
+                raise CatalogError("Legacy measurement is missing its metric")
+            quality = result.get("provenance_quality")
+            if (
+                not isinstance(quality, dict)
+                or not isinstance(quality.get("missing_fields"), list)
+                or not isinstance(quality.get("warnings"), list)
+            ):
+                raise CatalogError(
+                    "Legacy measurement must explicitly declare provenance gaps and warnings"
+                )
+            return result
         if result.get("origin") != "native":
-            raise CatalogError("A terminal measurement must declare native origin")
+            raise CatalogError("A terminal measurement must declare native or legacy origin")
         for section in ("model", "dataset", "protocol", "execution", "provenance_quality"):
             if not isinstance(result.get(section), dict):
                 raise CatalogError(f"Terminal measurement is missing native {section} metadata")
@@ -431,12 +446,142 @@ def validate_result(result):
     return result
 
 
+def _legacy_table_columns(result, role, artifact, path):
+    columns = artifact.get("columns")
+    if role == "observations":
+        observation_schema = result.get("observation_schema", {})
+        if observation_schema.get("version") not in (None, 1):
+            raise CatalogError("Unsupported legacy observation schema version")
+        schema_columns = observation_schema.get("columns")
+        if columns is not None and schema_columns is not None and columns != schema_columns:
+            raise CatalogError("Legacy observation artifact schema disagrees with result metadata")
+        if columns is None:
+            columns = schema_columns
+    if columns is None:
+        try:
+            with path.open(newline="", encoding="utf-8") as stream:
+                columns = next(csv.reader(stream), None)
+        except (OSError, UnicodeDecodeError, csv.Error) as error:
+            raise CatalogError(f"Cannot read legacy {role} header from {path}: {error}") from error
+    if not isinstance(columns, list) or not columns or any(not isinstance(value, str) for value in columns):
+        raise CatalogError(f"Legacy {role} artifact has no declared table columns")
+    if artifact.get("columns") is not None and artifact["columns"] != columns:
+        raise CatalogError(f"Legacy {role} artifact schema disagrees with result metadata")
+    return columns
+
+
+def _load_legacy_measurement(bundle, result, *, verify_hashes):
+    """Validate available legacy evidence without claiming native population completeness."""
+    bundle = bundle.resolve()
+    artifacts = result["artifacts"]
+    paths = {}
+    for role, artifact in artifacts.items():
+        if not isinstance(artifact, dict) or not isinstance(artifact.get("path"), str) or not artifact["path"]:
+            raise CatalogError(f"Legacy artifact {role} has no relative path")
+        relative = Path(artifact["path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise CatalogError(f"Legacy artifact path must be relative to its measurement: {role}")
+        path = (bundle / relative).resolve()
+        if bundle not in path.parents or not path.is_file():
+            raise CatalogError(f"Missing or out-of-bundle legacy artifact: {role}")
+        size = path.stat().st_size
+        if artifact.get("bytes") is not None:
+            if not isinstance(artifact["bytes"], int) or artifact["bytes"] != size:
+                raise CatalogError(f"Legacy artifact byte size mismatch: {path}")
+        digest = artifact.get("sha256")
+        if digest is not None:
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise CatalogError(f"Legacy artifact has invalid SHA-256 metadata: {role}")
+            if verify_hashes and sha256_file(path)[0] != digest:
+                raise CatalogError(f"Legacy artifact hash mismatch: {path}")
+        if role in ("observations", "samples") and artifact.get("schema_version") not in (None, 1):
+            raise CatalogError(f"Unsupported legacy table schema version for {role}")
+        paths[role] = path
+
+    observation_rows = []
+    if "observations" in paths:
+        artifact = artifacts["observations"]
+        columns = _legacy_table_columns(result, "observations", artifact, paths["observations"])
+        if any(field not in columns for field in OBSERVATION_KEY):
+            raise CatalogError("Legacy observations must use canonical sample/class/prototype/repetition keys")
+        observation_rows = _read_csv(paths["observations"], columns)
+        keys = set()
+        observation_counts = {}
+        for row in observation_rows:
+            for field in ("class_id", "prototype_id", "repetition"):
+                _integer(row[field], field)
+            key = tuple(row[name] for name in OBSERVATION_KEY)
+            if key in keys:
+                raise CatalogError(f"Duplicate legacy observation key: {key}")
+            keys.add(key)
+            observation_counts[row["sample_id"]] = observation_counts.get(row["sample_id"], 0) + 1
+            for column, value in row.items():
+                if (
+                    re.fullmatch(r"(?:noisy_)?part_\d+", column)
+                    and value.strip().lower() not in ("", "0", "1", "nan", "null", "none")
+                ):
+                    raise CatalogError(f"Invalid legacy presence value {value!r} in {column}")
+    else:
+        observation_counts = {}
+
+    sample_rows = None
+    if "samples" in paths:
+        artifact = artifacts["samples"]
+        columns = _legacy_table_columns(result, "samples", artifact, paths["samples"])
+        if tuple(columns) != SAMPLE_COLUMNS:
+            raise CatalogError("Legacy sample tables must use the canonical partial-samples columns")
+        sample_rows = _read_csv(paths["samples"], SAMPLE_COLUMNS)
+        seen_ids = set()
+        previous_index = -1
+        for row in sample_rows:
+            index = _integer(row["sample_index"], "sample_index")
+            if index < 0 or index <= previous_index:
+                raise CatalogError("Legacy partial sample indices must be unique and ordered")
+            previous_index = index
+            if row["sample_id"] in seen_ids:
+                raise CatalogError(f"Duplicate legacy sample ID: {row['sample_id']}")
+            seen_ids.add(row["sample_id"])
+            if row["outcome"] not in SAMPLE_OUTCOMES:
+                raise CatalogError(f"Invalid legacy sample outcome: {row['outcome']}")
+            if row["outcome"] in ("excluded", "failed") and not row["reason"]:
+                raise CatalogError(f"Legacy sample outcome {row['outcome']} requires a reason")
+            count = _integer(row["observation_count"], "observation_count")
+            if count < 0:
+                raise CatalogError("Legacy sample observation counts cannot be negative")
+            if "observations" in paths:
+                if count != observation_counts.get(row["sample_id"], 0):
+                    raise CatalogError(f"Legacy observation count mismatch for sample {row['sample_id']}")
+                if row["outcome"] == "contributed" and count == 0:
+                    raise CatalogError("A legacy contributing sample must have observations")
+                if row["outcome"] == "processed_no_observations" and count:
+                    raise CatalogError("A legacy sample without observations has observation rows")
+
+    coverage = result.get("dataset", {}).get("identity_coverage", {})
+    membership_complete = (
+        isinstance(coverage, dict) and coverage.get("candidate_membership") == "complete"
+    )
+    if membership_complete:
+        if sample_rows is None:
+            raise CatalogError("Legacy record claims complete candidate membership without samples.csv")
+        sample_indices = [_integer(row["sample_index"], "sample_index") for row in sample_rows]
+        if sample_indices != list(range(len(sample_rows))):
+            raise CatalogError("Complete legacy sample membership must use consecutive sample indices")
+        candidate_count = result.get("dataset", {}).get("candidate_count")
+        if candidate_count is not None and candidate_count != len(sample_rows):
+            raise CatalogError("Legacy candidate count disagrees with its complete sample table")
+        if set(observation_counts) - {row["sample_id"] for row in sample_rows}:
+            raise CatalogError("Legacy observations contain samples outside complete candidate membership")
+    return result
+
+
 def load_measurement(bundle, *, verify_hashes=True):
     """Load a measurement and validate finalized artifacts and population counts."""
     bundle = Path(bundle)
     result = validate_result(_read_json(bundle / "result.json"))
     if result["status"] not in ("complete", "failed"):
         return result
+    if result.get("origin") == "legacy":
+        return _load_legacy_measurement(bundle, result, verify_hashes=verify_hashes)
 
     artifacts = result["artifacts"]
     if result["status"] == "complete" and set(artifacts) != {"observations", "samples"}:
