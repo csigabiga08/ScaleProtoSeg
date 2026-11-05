@@ -300,6 +300,10 @@ complete nested record preserved in `metadata_json`:
   --metric consistency --output /path/to/analysis/consistency.csv
 ```
 
+Flat CSV exports refuse an existing destination file. Summary and plot exports
+require a new output directory; choose a different path for each run rather than
+reusing a directory, which avoids overwriting symlink targets or mixing stale tables.
+
 Validate a selected record, recompute its exact metric aggregates, or save derived
 summary tables outside the canonical catalog bundle:
 

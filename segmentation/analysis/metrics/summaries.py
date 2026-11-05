@@ -167,6 +167,8 @@ def summarize_observations(result, observations):
             if key in keys:
                 raise SummaryError(f"Duplicate observation key: {key}")
             keys.add(key)
+            for part_id in clean_columns:
+                support[key[1], part_id].setdefault(key[2], set())
             values = {}
             for part_id, column in clean_columns.items():
                 value = _presence(row.get(column), column, index)
@@ -235,6 +237,8 @@ def summarize_observations(result, observations):
             if key in keys:
                 raise SummaryError(f"Duplicate observation key: {key}")
             keys.add(key)
+            for part_id in clean_columns:
+                support[key[1], part_id].setdefault(key[2], set())
             equalities = []
             for part_id, column in sorted(clean_columns.items()):
                 clean = _presence(row.get(column), column, index)
@@ -336,6 +340,8 @@ def _support_rows(support):
             "part_id": part_id,
             "usable_images": len(union),
             "sample_ids": sorted(union),
-            "prototype_support_matches": bool(sets) and all(values == sets[0] for values in sets),
+            "prototype_support_matches": (
+                bool(sets) and bool(sets[0]) and all(values == sets[0] for values in sets)
+            ),
         })
     return result

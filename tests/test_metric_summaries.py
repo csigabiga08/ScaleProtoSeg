@@ -20,8 +20,22 @@ CONSISTENCY_PROTOCOL = {
     "version": 1,
     "metric": "consistency",
     "quantile": 0.8,
-    "activation": {"quantile_interpolation": "linear"},
-    "centroids": {"component_rule": "connected components"},
+    "activation": {
+        "prototype_distance_activation": "log",
+        "prototype_activation_function": "log",
+        "normalization_mean": [0.1, 0.2, 0.3],
+        "normalization_std": [1.0, 1.0, 1.0],
+        "resize_interpolation": "nearest",
+        "quantile_support": "semantic-class pixels",
+        "quantile_interpolation": "linear",
+        "active_comparison": "strictly greater than quantile",
+        "quantile_class_mask": "semantic class mask",
+    },
+    "centroids": {
+        "component_rule": "connected components",
+        "background_component_centroid_included": False,
+        "exclude_background_centroid": True,
+    },
     "parts": {
         "valid_part_ids": [1, 2],
         "mapping_identity": {"status": "available", "sha256": "c" * 64},
@@ -29,8 +43,20 @@ CONSISTENCY_PROTOCOL = {
             "fixture": {"part_id_to_name": {"1": "part one", "2": "part two"}},
         },
     },
-    "classes": {"evaluation_class_id_to_label": {"1": "fixture", "2": "other"}},
-    "prototype_selection": {"class_identity_rule": "recorded"},
+    "classes": {
+        "id_convention": {"model_class_index": "class_id - 1"},
+        "evaluation_class_id_to_label": {"1": "fixture", "2": "other"},
+        "ignored_or_void_evaluation_class_id": 0,
+        "background_evaluation_class_id": None,
+        "excluded_evaluation_class_ids": [],
+    },
+    "prototype_selection": {
+        "class_identity_rule": "recorded",
+        "excluded_evaluation_class_ids": [],
+        "grouping_active": False,
+        "group_nonzero_rule": "nonzero",
+        "group_intersection_rule": "none",
+    },
     "consistency": {
         "threshold": 0.8,
         "strict_comparison": "mean part presence > threshold",
@@ -188,6 +214,7 @@ class MetricSummaryTests(unittest.TestCase):
         ]
         bundle = write_measurement(self.root, record, rows)
         outside = Path(self.temporary.name) / "summary-export"
+        summary_output = outside / "summary"
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
@@ -207,9 +234,12 @@ class MetricSummaryTests(unittest.TestCase):
             self.assertEqual(json.loads(output.getvalue())[0]["origin"], "legacy")
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(catalog_cli.main(["summarize", "cli", "--output-dir", str(outside)]), 0)
-        self.assertTrue((outside / "summary.json").is_file())
-        summary = json.loads((outside / "summary.json").read_text())
+                self.assertEqual(
+                    catalog_cli.main(["summarize", "cli", "--output-dir", str(summary_output)]),
+                    0,
+                )
+        self.assertTrue((summary_output / "summary.json").is_file())
+        summary = json.loads((summary_output / "summary.json").read_text())
         self.assertEqual(summary["score"]["value"], 1.0)
 
     def test_summarize_all_status_allows_finalized_failures_but_never_running(self):
@@ -404,6 +434,41 @@ class MetricSummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(CatalogError, "outside catalog measurements"):
             catalog_cli.ensure_external_output(bundle / "result.json", self.root)
 
+    def test_summary_export_rejects_existing_symlink_without_touching_target(self):
+        destination = Path(self.temporary.name) / "summary-output"
+        destination.mkdir()
+        sentinel = Path(self.temporary.name) / "sentinel.json"
+        sentinel.write_text('{"keep":"untouched"}\n', encoding="utf-8")
+        (destination / "summary.json").symlink_to(sentinel)
+
+        with self.assertRaises(CatalogError):
+            catalog_cli.export_summary(
+                legacy_record("symlink-summary"),
+                {"score": {"value": 1.0}},
+                destination,
+                root=self.root,
+            )
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"keep":"untouched"}\n')
+
+    def test_summary_export_refuses_reuse_to_prevent_stale_tables(self):
+        destination = Path(self.temporary.name) / "summary-output"
+        first = {
+            "score": {"value": 1.0},
+            "classes": [{"class_id": 1, "value": 1.0}],
+            "parts": [{"class_id": 1, "part_id": 2, "mean_presence": 1.0}],
+        }
+        catalog_cli.export_summary(legacy_record("first-summary"), first, destination, root=self.root)
+        parts_before = (destination / "parts.csv").read_bytes()
+
+        with self.assertRaises(CatalogError):
+            catalog_cli.export_summary(
+                legacy_record("empty-summary"),
+                {"score": {"value": None}, "classes": [], "parts": []},
+                destination,
+                root=self.root,
+            )
+        self.assertEqual((destination / "parts.csv").read_bytes(), parts_before)
+
     def test_plots_keep_attempts_separate_and_export_exact_tables(self):
         records = []
         for measurement_id, quantile, sample_ids in (
@@ -413,6 +478,7 @@ class MetricSummaryTests(unittest.TestCase):
         ):
             record = legacy_record(measurement_id, quantile=quantile)
             record["model"]["inputs"]["prototype_checkpoint"]["sha256"] = "b" * 64
+            record["dataset"]["identity"] = "same-manifest"
             rows = [
                 {
                     "sample_id": sample_id, "class_id": "1", "prototype_id": "2", "repetition": "0",
@@ -456,6 +522,19 @@ class MetricSummaryTests(unittest.TestCase):
         metadata = json.loads((destination / "visualization_metadata.json").read_text())
         self.assertEqual(metadata["measurement_ids"], ["q70", "q70-repeat", "q80"])
         self.assertFalse(metadata["support_comparable"])
+        sentinel = Path(self.temporary.name) / "plot-sentinel.csv"
+        sentinel.write_text("keep this content\n", encoding="utf-8")
+        heatmap_export = destination / "01_heatmap_values.csv"
+        heatmap_export.unlink()
+        heatmap_export.symlink_to(sentinel)
+        with self.assertRaises(CatalogError):
+            visualizations.render_measurements(
+                [item[1] for item in records],
+                summaries_by_id,
+                destination,
+                root=self.root,
+            )
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep this content\n")
         unidentified = json.loads(json.dumps(records[0][1]))
         unidentified["measurement_id"] = "unidentified"
         unidentified["dataset"]["identity"] = "partial"
@@ -480,6 +559,70 @@ class MetricSummaryTests(unittest.TestCase):
                 0,
             )
         self.assertTrue((cli_output / "all_four_visualizations.pdf").is_file())
+
+    def test_comparison_rejects_matching_but_unknown_protocol_fields(self):
+        records = []
+        summaries_by_id = []
+        for measurement_id, quantile in (("unknown-q70", 0.7), ("unknown-q80", 0.8)):
+            record = legacy_record(measurement_id, quantile=quantile)
+            record["model"]["inputs"]["prototype_checkpoint"]["sha256"] = "b" * 64
+            record["dataset"]["identity"] = "same-manifest"
+            record["protocol"]["activation"]["quantile_interpolation"] = None
+            record["provenance_quality"]["missing_fields"].append(
+                "activation.quantile_interpolation"
+            )
+            rows = [{
+                "sample_id": "sample",
+                "class_id": "1",
+                "prototype_id": "1",
+                "repetition": "0",
+                "part_1": "1",
+                "part_2": "0",
+            }]
+            bundle = write_measurement(self.root, record, rows)
+            records.append(record)
+            summaries_by_id.append(
+                summaries.summarize_observations(record, catalog_cli.read_observations(bundle, record))
+            )
+        with self.assertRaisesRegex(visualizations.VisualizationError, "quantile_interpolation"):
+            visualizations.render_measurements(
+                records,
+                summaries_by_id,
+                Path(self.temporary.name) / "unknown-protocol-plots",
+                root=self.root,
+            )
+
+    def test_all_unavailable_part_combinations_are_retained_as_unverified_support(self):
+        record = legacy_record("sparse-support")
+        rows = [
+            {
+                "sample_id": "available",
+                "class_id": "1",
+                "prototype_id": "1",
+                "repetition": "0",
+                "part_1": "1",
+                "part_2": "",
+            },
+            {
+                "sample_id": "unavailable",
+                "class_id": "1",
+                "prototype_id": "2",
+                "repetition": "0",
+                "part_1": "",
+                "part_2": "",
+            },
+        ]
+        result = summaries.summarize_observations(record, rows)
+        part_two = next(item for item in result["support"] if item["part_id"] == 2)
+        self.assertEqual(part_two["usable_images"], 0)
+        self.assertEqual(part_two["sample_ids"], [])
+        self.assertFalse(part_two["prototype_support_matches"])
+        rendered_tables, support_comparable = visualizations._tables([record], [result])
+        self.assertFalse(support_comparable)
+        self.assertIn(
+            (1, 2),
+            {(row["class_id"], row["part_id"]) for row in rendered_tables["support"]},
+        )
 
 
 if __name__ == "__main__":

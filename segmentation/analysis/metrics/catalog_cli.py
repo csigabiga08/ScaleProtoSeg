@@ -163,12 +163,31 @@ def _flatten(value, prefix=""):
 
 def ensure_external_output(path, root=None):
     """Reject any derived output inside canonical measurement storage."""
-    target = Path(path).expanduser().resolve()
+    requested = Path(path).expanduser()
+    if requested.is_symlink():
+        raise CatalogError(f"Derived export destination cannot be a symlink: {requested}")
+    target = requested.resolve()
     root = Path(root) if root is not None else configured_catalog_root()
     canonical = (root / "measurements").resolve()
     if target == canonical or canonical in target.parents:
         raise CatalogError(f"Derived exports must be outside catalog measurements: {target}")
     return target
+
+
+def _create_fresh_output_dir(path, root=None):
+    output_dir = ensure_external_output(path, root)
+    if output_dir.exists() or output_dir.is_symlink():
+        raise CatalogError(
+            f"Derived output directory must not already exist; choose a fresh path: {output_dir}"
+        )
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        output_dir.mkdir()
+    except FileExistsError as error:
+        raise CatalogError(
+            f"Derived output directory must not already exist; choose a fresh path: {output_dir}"
+        ) from error
+    return output_dir
 
 
 def export_records(records, output, root=None):
@@ -177,12 +196,15 @@ def export_records(records, output, root=None):
     records = list(records)
     flattened = [_flatten(record) for record in records]
     keys = sorted({key for row in flattened for key in row} | {"metadata_json"})
-    with output.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=keys)
-        writer.writeheader()
-        for record, row in zip(records, flattened):
-            row["metadata_json"] = json.dumps(record, ensure_ascii=False, sort_keys=True)
-            writer.writerow(row)
+    try:
+        with output.open("x", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=keys)
+            writer.writeheader()
+            for record, row in zip(records, flattened):
+                row["metadata_json"] = json.dumps(record, ensure_ascii=False, sort_keys=True)
+                writer.writerow(row)
+    except FileExistsError as error:
+        raise CatalogError(f"Derived export file already exists: {output}") from error
     return output
 
 
@@ -255,11 +277,9 @@ def validate_measurement(bundle):
 
 
 def export_summary(result, summary, output_dir, root=None):
-    output_dir = ensure_external_output(output_dir, root)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8"
-    )
+    output_dir = _create_fresh_output_dir(output_dir, root)
+    with (output_dir / "summary.json").open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(summary, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
     tables = {
         "classes.csv": summary.get("classes", []),
         "prototypes.csv": summary.get("prototypes", []),
@@ -271,7 +291,7 @@ def export_summary(result, summary, output_dir, root=None):
         if not rows:
             continue
         columns = list(rows[0])
-        with (output_dir / name).open("w", newline="", encoding="utf-8") as stream:
+        with (output_dir / name).open("x", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=columns)
             writer.writeheader()
             for row in rows:
