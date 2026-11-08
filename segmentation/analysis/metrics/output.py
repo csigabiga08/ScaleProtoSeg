@@ -29,6 +29,7 @@ def output_directory(
     metric, checkpoint, data_type, *, quantile, threshold=None, std_dev=None,
     seed=None, group_checkpoint=None, official_parts_only=False,
     require_semantic_match=False, exclude_background_centroid=False, output_dir=None,
+    merge_left_right_parts=False,
 ):
     """Return the model's shared folder for this part/centroid configuration."""
     if output_dir is not None:
@@ -43,7 +44,7 @@ def output_directory(
 class MetricOutput:
     """Write human-readable JSON parameters before evaluation and its result after."""
 
-    def __init__(self, metric, checkpoint, data_type, *, model_name, training_phase, **parameters):
+    def __init__(self, metric, checkpoint, data_type, *, model_name, training_phase, part_groups=None, **parameters):
         self.path = output_directory(metric, checkpoint, data_type, **parameters)
         self.path.mkdir(parents=True, exist_ok=True)
         group = "ungrouped"
@@ -58,6 +59,8 @@ class MetricOutput:
         tokens.append(f"qt_{parameters['quantile']}")
         if parameters.get("seed") is not None:
             tokens.append(f"seed_{parameters['seed']}")
+        if parameters.get("merge_left_right_parts"):
+            tokens.append("lrmerged")
         tokens.extend((f"checkpoint_{_label(Path(checkpoint).stem)}", f"group_{group}"))
         self.file_suffix = "_".join(tokens)
         self.metric = metric
@@ -94,6 +97,8 @@ class MetricOutput:
             "packages": versions,
             "command": sys.argv,
         }
+        if part_groups is not None:
+            self.description["left_right_part_groups"] = part_groups
         self._write()
 
     def file(self, kind, extension):

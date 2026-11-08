@@ -257,6 +257,68 @@ in memory to both clean and noisy images and does not modify cached labels. The 
 filter is recorded in the description; Pascal semantic matching does not apply the
 Cityscapes taxonomy.
 
+### Pascal consistency with left/right parts merged
+
+Add `--merge-left-right-parts` to the **consistency** command for Pascal VOC.
+It is not a Cityscapes option and does not change stability evaluation. The default
+continues to treat left/right labels separately.
+
+This pools 54 left/right pairs across 11 Pascal object classes, using the normalized
+part IDs from `parts.yaml`. For example, a person's left and right eyes become one
+candidate part; front/back and upper/lower distinctions remain separate. Unpaired
+parts are unchanged. The cached labels and masks are never modified.
+
+Connected-component centroids are still computed separately for each original part
+label. For each prototype/image, a paired part is hit if **any** centroid of either
+side is inside that prototype's activation map. The side hits are ORed **before**
+computing the across-image mean. An image counts toward that pair's average when
+at least one side is annotated; when neither side is annotated the observation is
+NaN and is ignored. The existing centroid option still applies independently to
+each original mask: use `--exclude-background-centroid` for actual part-component
+centroids only.
+
+The consistency decision otherwise stays the same: a prototype is consistent if
+at least one candidate part's mean hit frequency is **strictly greater than**
+`--threshold`. The score is the proportion of consistent prototypes. This measures
+consistency with a bilateral part category, rather than a particular side. Because
+the paired category uses the union of the sides' annotated images, the final score
+is not guaranteed to increase.
+
+For example, if a prototype hits only the left eye in image A and only the right
+eye in image B, with both eyes annotated in each image, the old frequencies are
+0.5 and 0.5. The merged eye frequency is 1.0, exceeding the default 0.8 threshold.
+
+```text
+for each image, object class, prototype:
+    compute centroids separately for every ORIGINAL part label
+    compute binary centroid hits using the prototype activation map
+    for each left/right pair:
+        if either side is annotated:
+            hit[pair] = hit[left] OR hit[right]
+        else:
+            hit[pair] = NaN
+    keep unpaired part hits unchanged
+
+for each prototype:
+    frequency[part] = mean of non-NaN hits across images
+    consistent = any(frequency[part] > consistency_threshold)
+score = mean(consistent across prototypes)
+```
+
+The merged candidate uses the left member's `part_<id>` CSV column; the right
+member's column becomes NaN to avoid counting the pair twice. The description JSON
+records the option and the complete class-specific canonical-ID/member-label map.
+The existing four output folder names are unchanged. Merged-run result and
+description filenames include `lrmerged` so they coexist with separate-side runs.
+
+```bash
+sbatch --output="$PWD/consistency-lrmerged-%j.out" scripts/run_metric.slurm \
+  consistency pascalvoc push_best pascal \
+  --checkpoint /data/shared/protoseg/checkpoints/pascalvoc/checkpoints/push_best.pth \
+  --require-semantic-match --exclude-background-centroid \
+  --merge-left-right-parts --quantile 0.8 --threshold 0.8
+```
+
 Select an exact evaluated checkpoint with `--checkpoint` for consistency or
 `--checkpoint-path` for stability. Select a prototype-filter checkpoint using
 `--group-checkpoint /path/to/group.pth` on either calculator, or retain the existing
