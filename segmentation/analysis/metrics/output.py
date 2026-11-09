@@ -16,6 +16,16 @@ from segmentation.analysis.metrics.catalog import (
     resolve_catalog_root,
     sha256_file,
 )
+from segmentation.analysis.metrics.schema import (
+    Artifact,
+    DatasetMetadata,
+    ExecutionMetadata,
+    Failure,
+    MeasurementOutput,
+    ModelMetadata,
+    Population,
+    Score,
+)
 
 
 def _file_identity(path):
@@ -102,28 +112,28 @@ class MetricOutput:
         inputs = {"prototype_checkpoint": _file_identity(checkpoint)}
         if group_checkpoint is not None:
             inputs["group_checkpoint"] = _file_identity(group_checkpoint)
-        self.result = {
-            "measurement_id": self.measurement_id,
-            "metric": self.metric,
-            "status": "running",
-            "created_at_utc": _now(),
-            "completed_at_utc": None,
-            "model": {
-                "label": model_name,
-                "training_stage": training_phase,
-                "dataset": data_type,
-                "architecture": None,
-                "inputs": inputs,
-            },
-            "dataset": {"name": data_type, "split": "val"},
-            "protocol": protocol,
-            "parameters": _json_value(parameters),
-            "execution": {"commit": _git_commit(), "command": list(sys.argv)},
-            "population": None,
-            "selected_prototype_ids": [],
-            "scores": {},
-            "artifacts": {},
-        }
+        self.result = MeasurementOutput(
+            measurement_id=self.measurement_id,
+            metric=self.metric,
+            status="running",
+            created_at_utc=_now(),
+            completed_at_utc=None,
+            model=ModelMetadata(
+                label=model_name,
+                training_stage=training_phase,
+                dataset=self.data_type,
+                architecture=None,
+                inputs={role: Artifact(**identity) for role, identity in inputs.items()},
+            ),
+            dataset=DatasetMetadata(name=self.data_type, split="val"),
+            protocol=protocol,
+            parameters=_json_value(parameters),
+            execution=ExecutionMetadata(commit=_git_commit(), command=list(sys.argv)),
+            population=None,
+            selected_prototype_ids=[],
+            scores={},
+            artifacts={},
+        )
         self._write_result()
 
     def _ensure_running(self):
@@ -134,7 +144,7 @@ class MetricOutput:
         temporary = self.path / f".result.{uuid.uuid4().hex}.tmp"
         try:
             with temporary.open("x", encoding="utf-8") as stream:
-                json.dump(self.result, stream, indent=2, allow_nan=False)
+                json.dump(self.result.model_dump(mode="json", exclude_unset=True), stream, indent=2, allow_nan=False)
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -151,22 +161,23 @@ class MetricOutput:
     def set_candidates(self, sample_ids):
         self._ensure_running()
         self._candidate_count = len(set(str(sample_id) for sample_id in sample_ids))
-        self.result["dataset"]["candidate_count"] = self._candidate_count
+        self.result.dataset.candidate_count = self._candidate_count
 
     def update_metadata(self, **fields):
         self._ensure_running()
         for key, value in fields.items():
-            self.result[key] = _json_value(value)
+            setattr(self.result, key, _json_value(value))
         self._write_result()
 
     def register_input(self, role, path):
         self._ensure_running()
-        self.result["model"]["inputs"][role] = _file_identity(path)
+        self.result.model.inputs[role] = Artifact(**_file_identity(path))
         self._write_result()
 
     def update_model_metadata(self, **fields):
         self._ensure_running()
-        self.result["model"].update(_json_value(fields))
+        for key, value in _json_value(fields).items():
+            setattr(self.result.model, key, value)
         self._write_result()
 
     def set_selected_prototype_ids(self, prototype_ids):
@@ -230,12 +241,12 @@ class MetricOutput:
         return self._artifacts[filename]
 
     def _finalize_files(self):
-        self.result["artifacts"] = {"observations": self._write_observations()}
-        self.result["population"] = {
-            "candidates": self._candidate_count,
-            "contributing": len(self._observation_counts),
-            "observations": len(self._observations),
-        }
+        self.result.artifacts = {"observations": Artifact(**self._write_observations())}
+        self.result.population = Population(
+            candidates=self._candidate_count,
+            contributing=len(self._observation_counts),
+            observations=len(self._observations),
+        )
 
     def finish(self, value, *, numerator=None, denominator=None, reason=None):
         self._ensure_running()
@@ -247,17 +258,17 @@ class MetricOutput:
             reason = reason or "score denominator is zero"
             value = None
         self._finalize_files()
-        self.result["scores"] = {
-            self.metric: {
-                "value": value,
-                "unit": "fraction",
-                "numerator": _json_value(numerator),
-                "denominator": _json_value(denominator),
+        self.result.scores = {
+            self.metric: Score(
+                value=value,
+                unit="fraction",
+                numerator=_json_value(numerator),
+                denominator=_json_value(denominator),
                 **({"reason": str(reason)} if reason else {}),
-            }
+            )
         }
-        self.result["status"] = "complete"
-        self.result["completed_at_utc"] = _now()
+        self.result.status = "complete"
+        self.result.completed_at_utc = _now()
         self._write_result()
         self._terminal = True
 
@@ -265,17 +276,17 @@ class MetricOutput:
         self._ensure_running()
         message = str(error)[:500]
         self._finalize_files()
-        self.result["status"] = "failed"
-        self.result["completed_at_utc"] = _now()
-        self.result["failure"] = {"type": type(error).__name__, "message": message}
-        self.result["scores"] = {
-            self.metric: {
-                "value": None,
-                "unit": "fraction",
-                "numerator": None,
-                "denominator": None,
-                "reason": "measurement failed before a final score was available",
-            }
+        self.result.status = "failed"
+        self.result.completed_at_utc = _now()
+        self.result.failure = Failure(type=type(error).__name__, message=message)
+        self.result.scores = {
+            self.metric: Score(
+                value=None,
+                unit="fraction",
+                numerator=None,
+                denominator=None,
+                reason="measurement failed before a final score was available",
+            )
         }
         self._write_result()
         self._terminal = True

@@ -20,6 +20,7 @@ from segmentation.analysis.metrics.catalog import (
     resolve_catalog_root,
 )
 from segmentation.analysis.metrics.output import MetricOutput
+from segmentation.analysis.metrics.schema import MeasurementOutput
 
 
 class MetricCatalogTests(unittest.TestCase):
@@ -110,7 +111,8 @@ class MetricCatalogTests(unittest.TestCase):
     def test_writer_publishes_hashed_observations_and_population_counts(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output(quantile=0.8, seed=41)
-            self.assertEqual(output.result["status"], "running")
+            self.assertIsInstance(output.result, MeasurementOutput)
+            self.assertEqual(output.result.status, "running")
             output.set_candidates(["missing", "empty", "used"])
             output.add_observation(
                 sample_id="used", class_id=3, prototype_id=12, repetition=0, part_1=1, part_2=None, part_3=0,
@@ -120,6 +122,10 @@ class MetricCatalogTests(unittest.TestCase):
 
             bundle = output.path
             self.assertEqual({path.name for path in bundle.iterdir()}, {"result.json", "observations.csv"})
+            self.assertEqual(
+                json.loads((bundle / "result.json").read_text()),
+                output.result.model_dump(mode="json", exclude_unset=True),
+            )
             record = load_measurement(bundle)
             self.assertEqual(record["status"], "complete")
             self.assertEqual(

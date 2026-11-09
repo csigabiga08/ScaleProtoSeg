@@ -9,7 +9,7 @@ Text = Annotated[str, StringConstraints(min_length=1, pattern=r"\S")]
 
 
 class Metadata(BaseModel):
-    model_config = ConfigDict(strict=True, extra="allow", allow_inf_nan=False)
+    model_config = ConfigDict(strict=True, extra="allow", allow_inf_nan=False, validate_assignment=True)
 
 
 class Artifact(Metadata):
@@ -32,6 +32,36 @@ class Score(Metadata):
         return self
 
 
+class ModelMetadata(Metadata):
+    label: Text
+    training_stage: Text
+    dataset: Text
+    architecture: Optional[Text]
+    inputs: dict[str, Artifact]
+
+
+class DatasetMetadata(Metadata):
+    name: Text
+    split: Text
+    candidate_count: Optional[Annotated[int, Field(ge=0)]] = None
+
+
+class ExecutionMetadata(Metadata):
+    commit: Optional[Text]
+    command: list[str]
+
+
+class Population(Metadata):
+    candidates: Optional[Annotated[int, Field(ge=0)]]
+    contributing: Annotated[int, Field(ge=0)]
+    observations: Annotated[int, Field(ge=0)]
+
+
+class Failure(Metadata):
+    type: Text
+    message: str
+
+
 class Measurement(Metadata):
     measurement_id: Text
     metric: Text
@@ -51,3 +81,14 @@ class Measurement(Metadata):
         ):
             raise ValueError("a complete measurement needs its score and observations artifact")
         return self
+
+
+class MeasurementOutput(Measurement):
+    """Typed native record emitted by MetricOutput."""
+
+    model: ModelMetadata
+    dataset: DatasetMetadata
+    execution: ExecutionMetadata
+    population: Optional[Population] = None
+    selected_prototype_ids: list[int]
+    failure: Optional[Failure] = None
