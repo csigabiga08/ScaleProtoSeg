@@ -124,7 +124,7 @@ def load_observations(bundle, *, verify_hashes=True):
     """Load validated metadata together with its finalized observation rows."""
     result, rows = _load(bundle, verify_hashes)
     if result["status"] == "running":
-        raise CatalogError("Running measurements cannot be summarized or plotted")
+        raise CatalogError("Running measurements have no finalized observation evidence")
     if rows is None:
         raise CatalogError("Measurement has no finalized observation evidence")
     return result, rows

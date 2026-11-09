@@ -1,4 +1,4 @@
-"""Metadata-only query, validation and summary commands for the metric catalog."""
+"""Metadata-only query and validation commands for the metric catalog."""
 
 import argparse
 import json
@@ -8,12 +8,10 @@ import sys
 from segmentation.analysis.metrics.catalog import (
     CatalogError,
     load_measurement,
-    load_observations,
     read_result,
     resolve_catalog_root,
     validate_result,
 )
-from segmentation.analysis.metrics.summaries import SummaryError, summarize_observations
 
 
 def configured_catalog_root(checkout=None):
@@ -154,13 +152,6 @@ def _command_parser():
     validate = commands.add_parser("validate", help="Validate selected metadata and canonical artifacts.")
     validate.add_argument("measurement_ids", nargs="*")
     validate.add_argument("--all-status", action="store_true")
-    summarize = commands.add_parser("summarize", help="Recompute one measurement's metric from observations.")
-    summarize.add_argument("measurement_id")
-    summarize.add_argument(
-        "--all-status",
-        action="store_true",
-        help="Allow summaries of failed records with finalized observations.",
-    )
     return parser
 
 
@@ -197,19 +188,7 @@ def main(argv=None):
             diagnostics = [validate_measurement(bundle) for bundle in selected]
             print(json.dumps(diagnostics, indent=2, ensure_ascii=False))
             return 0 if all(item["status"] == "valid" for item in diagnostics) else 1
-        if args.command == "summarize":
-            bundle, _discovered_result = find_measurement(root, args.measurement_id)
-            result, rows = load_observations(bundle)
-            status = result.get("status")
-            if status == "failed" and not args.all_status:
-                raise CatalogError(
-                    "Summaries default to complete measurements; pass --all-status "
-                    "to inspect a failed record"
-                )
-            summary = summarize_observations(result, rows)
-            print(json.dumps(summary, indent=2, ensure_ascii=False, allow_nan=False))
-            return 0
-    except (CatalogError, SummaryError, OSError, ValueError) as error:
+    except (CatalogError, OSError, ValueError) as error:
         parser.exit(2, f"{parser.prog}: error: {error}\n")
     return 2
 

@@ -278,7 +278,7 @@ and preprocessed data. `/data_ssd` storage can differ between nodes: the updated
 and configured caches must be available on the node you select. The result record's
 hostname and annotation paths identify which environment was used.
 
-### Querying and summarizing measurements
+### Querying the measurement catalog
 
 The metadata-only catalog CLI uses the same `MEASUREMENT_CATALOG_ROOT` environment
 setting as the metric writers. Exported values take precedence over this checkout's
@@ -297,24 +297,16 @@ model code:
 ```
 
 Running and failed measurements remain discoverable with `--all-status`; direct
-non-complete status filters also require that opt-in. Summaries default to complete
-records; finalized failed records may be inspected with `summarize --all-status`,
-but running records cannot be summarized.
+non-complete status filters also require that opt-in.
 
-Validate a record, or recompute its exact metric aggregates (printed as JSON):
+Validate a record or all selected records:
 
 ```bash
 .venv/bin/python -m segmentation.analysis.metrics.catalog_cli validate <measurement-id>
-.venv/bin/python -m segmentation.analysis.metrics.catalog_cli summarize <measurement-id>
 ```
 
-Consistency summaries use the recorded aggregation rule:
-per-part means omit blank/NaN unavailable values, while observed zero remains a miss;
-consistency uses strict `mean > threshold` and weights class/prototype rows as the
-recorded evaluator does. Stability summaries compare paired clean/noisy part vectors
-and do not substitute missing values with zero. Unknown aggregation or comparison
-protocols are rejected rather than reinterpreted. `validate` checks metadata, the
-observations artifact size and hash, and the population counts against the rows.
+`validate` checks metadata, the observations artifact size and hash, and the
+population counts against the rows.
 
 ## 🥇 Performance
 

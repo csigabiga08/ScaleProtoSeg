@@ -1,4 +1,4 @@
-"""CPU-only tests for catalog queries, and summaries."""
+"""CPU-only tests for catalog queries and validation."""
 
 import contextlib
 import copy
@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from segmentation.analysis.metrics import catalog_cli, summaries
+from segmentation.analysis.metrics import catalog_cli
 from segmentation.analysis.metrics.catalog import CatalogError, load_observations
 
 
@@ -34,18 +34,6 @@ CONSISTENCY_PROTOCOL = {
     "observation_columns": ["part_1", "part_2"],
 }
 
-STABILITY_PROTOCOL = {
-    "metric": "stability",
-    "quantile": 0.8,
-    "parts": {"valid_part_ids": [1, 2]},
-    "stability": {
-        "aggregation": "unweighted mean of exact all-part equality per paired sample/class/prototype row",
-        "missing_value_comparison": "zero versus zero for parts without annotated centroids",
-    },
-    "observation_columns": ["part_1", "part_2", "noisy_part_1", "noisy_part_2"],
-}
-
-
 def obs(sample_id, class_id=1, prototype_id=1, part_1="1", part_2="0", **extra):
     return {
         "sample_id": sample_id, "class_id": str(class_id), "prototype_id": str(prototype_id),
@@ -53,12 +41,12 @@ def obs(sample_id, class_id=1, prototype_id=1, part_1="1", part_2="0", **extra):
     }
 
 
-def make_record(measurement_id, *, metric="consistency", quantile=0.8, status="complete", checkpoint="b" * 64):
-    protocol = copy.deepcopy(CONSISTENCY_PROTOCOL if metric == "consistency" else STABILITY_PROTOCOL)
+def make_record(measurement_id, *, quantile=0.8, status="complete", checkpoint="b" * 64):
+    protocol = copy.deepcopy(CONSISTENCY_PROTOCOL)
     protocol["quantile"] = quantile
     return {
         "measurement_id": measurement_id,
-        "metric": metric,
+        "metric": "consistency",
         "status": status,
         "scores": {},
         "model": {"label": "fixture", "inputs": {"prototype_checkpoint": {"sha256": checkpoint}}},
@@ -95,7 +83,7 @@ def write_measurement(root, record, observations=None):
     return bundle
 
 
-class MetricSummaryTests(unittest.TestCase):
+class CatalogCliTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(dir=Path.cwd())
         self.addCleanup(self.temporary.cleanup)
@@ -141,17 +129,13 @@ class MetricSummaryTests(unittest.TestCase):
         (bundle / "observations.csv").unlink()
         self.assertEqual(catalog_cli.find_records()[0]["measurement_id"], "metadata-only")
 
-    def test_cli_list_validate_and_summarize_commands(self):
+    def test_cli_list_and_validate_commands(self):
         write_measurement(self.root, make_record("cli"), [obs("a"), obs("b")])
         code, text = self.run_cli("list")
         self.assertEqual((code, json.loads(text)[0]["measurement_id"]), (0, "cli"))
         self.assertEqual(json.loads(self.run_cli("list", "--metric", "stability")[1]), [])
         code, text = self.run_cli("validate", "cli")
         self.assertEqual((code, json.loads(text)[0]["status"]), (0, "valid"))
-        code, text = self.run_cli("summarize", "cli")
-        self.assertEqual(code, 0)
-        summary = json.loads(text)
-        self.assertEqual(summary["score"]["value"], 1.0)
 
     def test_validate_reports_invalid_bundles(self):
         bundle = write_measurement(self.root, make_record("tampered"), [obs("a")])
@@ -159,19 +143,6 @@ class MetricSummaryTests(unittest.TestCase):
         code, text = self.run_cli("validate", "tampered")
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(text)[0]["status"], "invalid")
-
-    def test_summarize_parses_each_artifact_once(self):
-        write_measurement(self.root, make_record("single-parse"), [obs("a")])
-        parsed = []
-        original_reader = csv.DictReader
-
-        def count_reader(stream, *args, **kwargs):
-            parsed.append(Path(stream.name).name)
-            return original_reader(stream, *args, **kwargs)
-
-        with patch("segmentation.analysis.metrics.catalog.csv.DictReader", side_effect=count_reader):
-            self.assertEqual(self.run_cli("summarize", "single-parse")[0], 0)
-        self.assertEqual(parsed, ["observations.csv"])
 
     def test_load_observations_distinguishes_empty_table_from_absent_evidence(self):
         bundle = write_measurement(self.root, make_record("empty", status="failed"), [obs("a")])
@@ -188,60 +159,6 @@ class MetricSummaryTests(unittest.TestCase):
         absent = write_measurement(self.root, make_record("absent", status="failed"))
         with self.assertRaisesRegex(CatalogError, "finalized observation evidence"):
             load_observations(absent)
-
-    def test_summarize_all_status_allows_finalized_failures_but_never_running(self):
-        write_measurement(self.root, make_record("failed-summary", status="failed"), [obs("a")])
-        write_measurement(self.root, make_record("running-summary", status="running"))
-        with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as failure:
-                self.run_cli("summarize", "failed-summary")
-        self.assertEqual(failure.exception.code, 2)
-        code, text = self.run_cli("summarize", "failed-summary", "--all-status")
-        self.assertEqual((code, json.loads(text)["score"]["value"]), (0, 1.0))
-        error = io.StringIO()
-        with contextlib.redirect_stderr(error), self.assertRaises(SystemExit):
-            self.run_cli("summarize", "running-summary", "--all-status")
-        self.assertIn("Running measurements cannot be summarized", error.getvalue())
-
-    def test_consistency_uses_strict_threshold_available_values_and_row_weighting(self):
-        rows = [
-            obs("a", 1, 1, "1", ""), obs("b", 1, 1, "0", "1"),
-            obs("c", 2, 2, "1", ""), obs("d", 2, 2, "1", ""), obs("e", 2, 2, "1", ""),
-            obs("f", 2, 2, "1", ""), obs("g", 2, 2, "0", ""),
-            obs("h", 2, 3, "", ""), obs("i", 2, 3, "0", ""),
-            obs("j", 3, 4, "", ""),
-        ]
-        result = summaries.summarize_observations(make_record("weighted"), rows)
-        self.assertEqual(result["score"], {"value": 1 / 4, "numerator": 1, "denominator": 4, "unit": "fraction"})
-        prototype = next(item for item in result["prototypes"] if item["prototype_id"] == 2)
-        self.assertFalse(prototype["consistent"], "exactly 0.8 must fail strict comparison")
-        part = next(item for item in result["parts"] if item["class_id"] == 2 and item["part_id"] == 1)
-        self.assertEqual(part["mean_presence"], 0.8)
-        missing = next(item for item in result["parts"] if item["class_id"] == 2 and item["part_id"] == 2)
-        self.assertIsNone(missing["mean_presence"], "unavailable part values must not become zeros")
-        unavailable = next(item for item in result["prototypes"] if item["prototype_id"] == 4)
-        self.assertIsNone(unavailable["max_part_frequency"])
-        classes = {item["class_id"]: item for item in result["classes"]}
-        self.assertEqual([classes[i]["value"] for i in (1, 2, 3)], [1.0, 0.0, 0.0])
-
-    def test_stability_compares_paired_vectors_without_coercing_missing_to_zero(self):
-        rows = [
-            obs("same", 1, 4, "0", "1", noisy_part_1="0", noisy_part_2="1"),
-            obs("missing", 1, 4, "", "1", noisy_part_1="", noisy_part_2="1"),
-            obs("changed", 2, 8, "0", "1", noisy_part_1="1", noisy_part_2="1"),
-        ]
-        result = summaries.summarize_observations(make_record("paired", metric="stability"), rows)
-        self.assertEqual(result["score"], {"value": 1 / 3, "numerator": 1, "denominator": 3, "unit": "fraction"})
-        self.assertFalse(result["stability_rows"][1]["stable"])
-        self.assertEqual(result["stability_rows"][1]["part_equalities"], [None, True])
-
-    def test_all_unavailable_part_combinations_are_retained_as_unverified_support(self):
-        record = make_record("sparse-support")
-        rows = [obs("available", 1, 1, "1", ""), obs("unavailable", 1, 2, "", "")]
-        result = summaries.summarize_observations(record, rows)
-        part_two = next(item for item in result["support"] if item["part_id"] == 2)
-        self.assertEqual(part_two["usable_images"], 0)
-        self.assertFalse(part_two["prototype_support_matches"])
 
 
 if __name__ == "__main__":
