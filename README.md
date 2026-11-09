@@ -191,6 +191,28 @@ python -m segmentation.eval_test  <your_training_run_name> <training_stage> <bat
 python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> <data_type> --quantile <quantile> --threshold <threshold>
 ```
 
+### Activation quantile scope
+
+Both consistency and stability accept `--quantile-scope class|image`:
+
+- `--quantile-scope class` (default) computes each prototype's quantile using only
+  its ground-truth semantic-class pixels and activates only pixels in that class.
+- `--quantile-scope image` computes each prototype's quantile using **all pixels in
+  its upsampled activation map** and permits active pixels anywhere in the image.
+  There is no semantic mask on the resulting activation area.
+
+For both modes, each prototype and image has its own threshold, computed with
+linear interpolation; pixels must be **strictly greater** than the threshold.
+Ties are inactive. Part filtering, centroid selection, and left/right merging
+remain separate options. Stability computes a threshold independently for clean
+and noisy activations using the same selected scope.
+
+Append `--quantile-scope image` to an existing Python or `scripts/run_metric.slurm`
+command to use the whole-image version. Whole-image runs add `qscope_image` to
+all result and description filenames; class-mode filenames retain their existing
+names. JSON descriptions record `parameters.quantile_scope`. Both modes use the
+same configuration folder unless `--output-dir` is supplied.
+
 ### Consistency and stability result folders
 
 Both calculators save into one of four folders in the evaluated checkpoint's model
