@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from hydra import compose, initialize_config_dir
+from hydra.errors import ConfigCompositionException
 import numpy as np
 import torch
 from PIL import Image
@@ -114,6 +115,17 @@ class StabilityPartsTests(unittest.TestCase):
             with patch.object(stability, "run_stability") as runner:
                 stability._run_config(config)
             self.assertEqual(runner.call_args.args[0].seed, 0)
+
+            with self.assertRaises(ConfigCompositionException):
+                compose(
+                    config_name="stability",
+                    overrides=[
+                        "model_name=test-model",
+                        "training_phase=push",
+                        "data_type=cityscapes",
+                        "unexpected_field=true",
+                    ],
+                )
 
             config_with_unknown_field = compose(
                 config_name="stability",
