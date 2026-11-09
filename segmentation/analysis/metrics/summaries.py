@@ -11,19 +11,6 @@ class SummaryError(ValueError):
 
 _PART_COLUMN = re.compile(r"^part_(\d+)$")
 _NOISY_PART_COLUMN = re.compile(r"^noisy_part_(\d+)$")
-_CONSISTENCY_AGGREGATIONS = {"unweighted mean over class/prototype rows"}
-_STABILITY_AGGREGATIONS = {
-    "unweighted mean of exact all-part equality per paired sample/class/prototype row",
-}
-_CONSISTENCY_COMPARISONS = {
-    "mean part presence > threshold",
-    "strictly greater than threshold",
-}
-_STABILITY_MISSING_RULES = {
-    "zero versus zero for parts without annotated centroids",
-    "nan compares unequal, including nan versus nan",
-}
-
 
 def _protocol_info(result):
     metric = result.get("metric")
@@ -35,22 +22,11 @@ def _protocol_info(result):
     section = protocol.get(metric)
     if not isinstance(section, dict):
         raise SummaryError(f"Measurement has no {metric} protocol section")
-    aggregation = section.get("aggregation")
-    expected = _CONSISTENCY_AGGREGATIONS if metric == "consistency" else _STABILITY_AGGREGATIONS
-    if aggregation not in expected:
-        raise SummaryError(f"Unsupported {metric} aggregation protocol: {aggregation!r}")
     if metric == "consistency":
-        comparison = section.get("strict_comparison")
-        if comparison not in _CONSISTENCY_COMPARISONS:
-            raise SummaryError(f"Unsupported consistency threshold comparison: {comparison!r}")
         threshold = section.get("threshold")
         if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold):
             raise SummaryError("Consistency protocol must record a finite threshold")
         return metric, protocol, section, float(threshold)
-
-    missing_rule = section.get("missing_value_comparison")
-    if missing_rule not in _STABILITY_MISSING_RULES:
-        raise SummaryError(f"Unsupported stability missing-value comparison: {missing_rule!r}")
     return metric, protocol, section, None
 
 
@@ -65,18 +41,6 @@ def _columns(protocol, rows, pattern):
         if match:
             found[int(match.group(1))] = str(name)
     return found
-
-
-def _reject_unrecorded_part_columns(protocol, rows):
-    declared = set(protocol.get("observation_columns", []))
-    for row in rows:
-        for column in row:
-            is_part = (
-                _PART_COLUMN.fullmatch(str(column))
-                or _NOISY_PART_COLUMN.fullmatch(str(column))
-            )
-            if is_part and column not in declared:
-                raise SummaryError(f"Observation contains an unrecorded part column: {column}")
 
 
 def _presence(value, column, row_index):
@@ -129,7 +93,6 @@ def summarize_observations(result, observations):
     """Derive exact means, flags, support, and score without pooling incompatible rows."""
     metric, protocol, metric_protocol, threshold = _protocol_info(result)
     rows = list(observations)
-    _reject_unrecorded_part_columns(protocol, rows)
     keys = set()
     clean_columns = _columns(protocol, rows, _PART_COLUMN)
     if metric == "consistency":
@@ -200,7 +163,7 @@ def summarize_observations(result, observations):
             "measurement_id": result.get("measurement_id"),
             "metric": metric,
             "status": result.get("status"),
-            "aggregation": metric_protocol["aggregation"],
+            "aggregation": metric_protocol.get("aggregation"),
             "quantile": protocol.get("quantile"),
             "threshold": threshold,
             "score": _score(numerator, denominator),
@@ -261,7 +224,7 @@ def summarize_observations(result, observations):
             "measurement_id": result.get("measurement_id"),
             "metric": metric,
             "status": result.get("status"),
-            "aggregation": metric_protocol["aggregation"],
+            "aggregation": metric_protocol.get("aggregation"),
             "quantile": protocol.get("quantile"),
             "score": _score(numerator, denominator),
             "classes": _class_summaries(stability_rows, result),

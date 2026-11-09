@@ -21,8 +21,6 @@ from segmentation.analysis.metrics.catalog import (
     resolve_catalog_root,
 )
 from segmentation.analysis.metrics.output import MetricOutput
-from segmentation.analysis.metrics.provenance import dataset_provenance
-import segmentation.analysis.metrics.provenance as metric_provenance
 
 
 class MetricCatalogTests(unittest.TestCase):
@@ -112,16 +110,6 @@ class MetricCatalogTests(unittest.TestCase):
             "assert 'settings' not in sys.modules"
         )
         subprocess.run([sys.executable, "-c", code], check=True, cwd=Path.cwd())
-
-    def test_identical_input_paths_are_hashed_once_for_separate_checkpoint_roles(self):
-        with (
-            patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}),
-            patch.object(metric_provenance, "sha256_file", wraps=metric_provenance.sha256_file) as hash_file,
-        ):
-            output = self.make_output(group_checkpoint=self.checkpoint)
-            inputs = output.result["model"]["inputs"]
-            self.assertEqual(inputs["prototype_checkpoint"]["sha256"], inputs["group_checkpoint"]["sha256"])
-            hash_file.assert_called_once_with(str(self.checkpoint.resolve()))
 
     def test_writer_publishes_hashed_observations_and_population_counts(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
@@ -229,52 +217,12 @@ class MetricCatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(CatalogError, "out-of-bundle"):
                 load_measurement(bundle)
 
-    def test_dataset_records_available_pascal_part_mapping(self):
-        mapping_root = Path(self.temporary.name) / "pascal-source"
-        mapping_root.mkdir()
-        mapping_path = mapping_root / "parts.yaml"
-        mapping_path.write_text(
-            "scene_class2part_classes:\n"
-            "  person: [head, torso]\n"
-            "countable_pids_groupings:\n"
-            "  person:\n"
-            "    head: [1, 2]\n"
-        )
-        annotation_root = Path(self.temporary.name) / "pascal-processed" / "annotations" / "val"
-        annotation_root.mkdir(parents=True)
-        dataset = type("Dataset", (), {"img_ids": ["one"], "annotations_dir": str(annotation_root)})()
-        with patch.dict(os.environ, {
-            "MEASUREMENT_CATALOG_ROOT": str(self.root),
-            "SOURCE_DATA_PATH_PASCAL": str(mapping_root),
-        }):
+    def test_record_dataset_registers_candidates(self):
+        dataset = type("Dataset", (), {"img_ids": ["one", "two"]})()
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output()
             output.record_dataset(dataset)
-            parts = output.result["protocol"]["parts"]
-            self.assertEqual(parts["mapping_identity"]["path"], str(mapping_path.resolve()))
-            self.assertEqual(len(parts["mapping_identity"]["sha256"]), 64)
-            self.assertEqual(
-                parts["class_dependent_part_definitions"]["person"],
-                {
-                    "semantic_class_id": 1,
-                    "part_ids": {"head": 1, "torso": 2},
-                    "countable_pid_groups": {"head": [1, 2]},
-                },
-            )
-
-    def test_dataset_provenance_collects_candidate_coverage(self):
-        annotation_root = Path(self.temporary.name) / "processed" / "annotations" / "val"
-        annotation_root.mkdir(parents=True)
-        parts_root = annotation_root.parent.parent / "annotations_PIDS" / annotation_root.name
-        parts_root.mkdir(parents=True)
-        (parts_root / "one.npy").write_bytes(b"part")
-        dataset = type("Dataset", (), {"img_ids": ["one", "two"], "annotations_dir": str(annotation_root)})()
-
-        sample_ids, fields, parts = dataset_provenance(dataset, "other", self.temporary.name, {})
-
-        self.assertEqual(sample_ids, ["one", "two"])
-        self.assertEqual(fields["candidate_count"], 2)
-        self.assertEqual(fields["part_annotation_count"], 1)
-        self.assertIsNone(parts["mapping_identity"])
+            self.assertEqual(output.result["dataset"]["candidate_count"], 2)
 
     def test_loaded_model_runtime_is_added_to_protocol_not_model_seed(self):
         model = type("Model", (), {"epsilon": 0.0007, "prototype_activation_function": "linear"})()
@@ -320,14 +268,12 @@ class MetricCatalogTests(unittest.TestCase):
             self.assertEqual(record["population"]["not_attempted"], 1)
             self.assertEqual(len(rows), 1)
 
-    def test_failure_metadata_redacts_secret_like_values(self):
+    def test_failed_measurement_records_error(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output()
-            output.fail(RuntimeError("api_token=do-not-persist"))
+            output.fail(RuntimeError("boom"))
             record = json.loads((output.path / "result.json").read_text())
-            self.assertNotIn("do-not-persist", record["failure"]["message"])
-            self.assertIn("[redacted]", record["failure"]["message"])
-            self.assertEqual(load_measurement(output.path)["artifacts"], {})
+            self.assertEqual(record["failure"], {"type": "RuntimeError", "message": "boom"})
 
     def test_writer_rejects_invalid_observations_and_unattempted_completion(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):

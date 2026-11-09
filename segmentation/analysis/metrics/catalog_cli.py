@@ -18,7 +18,6 @@ from segmentation.analysis.metrics.catalog import (
     write_derived_csv,
 )
 from segmentation.analysis.metrics.summaries import SummaryError, summarize_observations
-from segmentation.analysis.metrics.visualizations import render_measurements
 
 
 def configured_catalog_root(checkout=None):
@@ -199,16 +198,6 @@ def _filter_arguments(parser):
     parser.add_argument("--variant", action="append", default=[], metavar="DOTTED.PATH=VALUE")
 
 
-def _record_id_map(root, measurement_ids):
-    bundles = []
-    for measurement_id in measurement_ids:
-        bundle, result = find_measurement(root, measurement_id)
-        bundles.append((bundle, result))
-    if len({record.get("measurement_id") for _, record in bundles}) != len(bundles):
-        raise CatalogError("Measurement IDs must be unique; attempts are never implicitly pooled")
-    return bundles
-
-
 def _command_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -229,9 +218,6 @@ def _command_parser():
         action="store_true",
         help="Allow summaries of failed records with finalized observations.",
     )
-    plot = commands.add_parser("plot", help="Plot explicitly selected consistency measurements.")
-    plot.add_argument("measurement_ids", nargs="+")
-    plot.add_argument("--output-dir", required=True, type=Path)
     return parser
 
 
@@ -285,26 +271,6 @@ def main(argv=None):
                 print(export_summary(result, summary, args.output_dir, root))
             else:
                 print(json.dumps(summary, indent=2, ensure_ascii=False, allow_nan=False))
-            return 0
-        if args.command == "plot":
-            discovered = _record_id_map(root, args.measurement_ids)
-            bundles = []
-            for bundle, _record in discovered:
-                result, rows = load_observations(bundle)
-                bundles.append((bundle, result, rows))
-            if any(record.get("metric") != "consistency" for _, record, _rows in bundles):
-                raise SummaryError("The visualization command accepts consistency measurements only")
-            summaries = [
-                summarize_observations(record, rows)
-                for _bundle, record, rows in bundles
-            ]
-            rendered = render_measurements(
-                [record for _, record, _rows in bundles], summaries, args.output_dir, root=root
-            )
-            print(json.dumps({
-                "output_dir": str(rendered["output_dir"]),
-                "support_comparable": rendered["support_comparable"],
-            }))
             return 0
     except (CatalogError, SummaryError, OSError, ValueError) as error:
         parser.exit(2, f"{parser.prog}: error: {error}\n")

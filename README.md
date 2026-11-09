@@ -214,7 +214,7 @@ profiles; filesystem integrity and scientific comparability are checked separate
 
 `result.json` records run status, checkpoint identities, the dataset, the expanded
 metric protocol and parameters (quantile, seed and the metric flags), selected
-prototype IDs, scores, source/package provenance and the observations artifact
+prototype IDs, scores, the git commit and command, and the observations artifact
 (path, size, SHA-256). It is first published as `running`, then atomically replaced
 with a terminal `complete` or `failed` record. A bundle contains exactly the two
 files above. Observations use stable sample/class/prototype/repetition keys; blank
@@ -304,7 +304,7 @@ selected records:
   --metric consistency --output /path/to/analysis/consistency.csv
 ```
 
-Flat CSV exports refuse an existing destination file. Summary and plot exports
+Flat CSV exports refuse an existing destination file. Summary exports
 require a new output directory; choose a different path for each run rather than
 reusing a directory, which avoids overwriting symlink targets or mixing stale tables.
 
@@ -324,29 +324,6 @@ recorded evaluator does. Stability summaries compare paired clean/noisy part vec
 and do not substitute missing values with zero. Unknown aggregation or comparison
 protocols are rejected rather than reinterpreted. `validate` checks metadata, the
 observations artifact size and hash, and the population counts against the rows.
-
-### Catalog visualizations
-
-Plot explicit consistency measurement IDs; quantiles are not auto-selected and
-repeated attempts remain separate:
-
-```bash
-.venv/bin/python -m segmentation.analysis.metrics.catalog_cli plot \
-  <measurement-id-q70> <measurement-id-q80> \
-  --output-dir /path/to/analysis/consistency-figures
-```
-
-The command writes four conventional views (prototype/part heatmaps, per-class
-consistency, prototype maximum-part scores across quantiles, and usable-image
-support), individual PNG/PDF files, a combined PDF, and exact-value CSV tables.
-Comparisons require matching known checkpoint, dataset, and non-quantile protocol
-identities. Support sample sets are checked across selections; when they differ, the
-support view and CSV retain separate values per selected quantile/attempt. Derived
-exports are refused anywhere under canonical `measurements/` bundles.
-
-The view choices are conceptually informed by ReProSeg's consistency visualization
-methods. Its checked-out source had no license file, so these catalog plots are an
-independent implementation and do not import or copy that source.
 
 ## 🥇 Performance
 

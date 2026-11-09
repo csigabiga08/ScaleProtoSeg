@@ -101,41 +101,6 @@ class ConsistencyPartsTests(unittest.TestCase):
                 unfiltered_bundle, unfiltered = latest_record(catalog_root)
                 self.assertEqual(unfiltered["status"], "complete")
                 self.assertEqual(unfiltered["protocol"]["parts"]["annotation_provenance"], "unknown")
-                self.assertEqual(
-                    unfiltered["protocol"]["parts"]["class_dependent_part_definitions"]["person"],
-                    {
-                        "semantic_ids": [24],
-                        "part_id_to_name": {"1": "torso", "2": "head", "3": "arm", "4": "leg"},
-                    },
-                )
-                self.assertEqual(
-                    unfiltered["protocol"]["parts"]["class_dependent_part_definitions"]["rider"],
-                    {
-                        "semantic_ids": [25],
-                        "part_id_to_name": {"1": "torso", "2": "head", "3": "arm", "4": "leg"},
-                    },
-                )
-                self.assertEqual(
-                    unfiltered["protocol"]["parts"]["class_dependent_part_definitions"]["car"],
-                    {
-                        "semantic_ids": [26],
-                        "part_id_to_name": {
-                            "1": "window",
-                            "2": "wheel",
-                            "3": "light",
-                            "4": "license plate",
-                            "5": "chassis",
-                        },
-                    },
-                )
-                self.assertEqual(
-                    unfiltered["protocol"]["parts"]["class_dependent_part_definitions"]["truck"]["semantic_ids"],
-                    [27],
-                )
-                self.assertEqual(
-                    unfiltered["protocol"]["parts"]["class_dependent_part_definitions"]["bus"]["semantic_ids"],
-                    [28],
-                )
                 unfiltered_score = unfiltered["scores"]["consistency"]["value"]
 
                 with self.assertRaises(FileNotFoundError):

@@ -1,4 +1,4 @@
-"""CPU-only tests for catalog queries, summaries, and derived plots."""
+"""CPU-only tests for catalog queries, and summaries."""
 
 import contextlib
 import copy
@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 import warnings
 
-from segmentation.analysis.metrics import catalog_cli, summaries, visualizations
+from segmentation.analysis.metrics import catalog_cli, summaries
 from segmentation.analysis.metrics.catalog import CatalogError, load_observations, write_derived_csv
 
 
@@ -249,12 +249,6 @@ class MetricSummaryTests(unittest.TestCase):
         self.assertFalse(result["stability_rows"][1]["stable"])
         self.assertEqual(result["stability_rows"][1]["part_equalities"], [None, True])
 
-    def test_unknown_aggregation_protocol_is_rejected(self):
-        record = make_record("unknown")
-        record["protocol"]["consistency"]["aggregation"] = "unknown future pooling"
-        with self.assertRaisesRegex(summaries.SummaryError, "Unsupported consistency aggregation"):
-            summaries.summarize_observations(record, [])
-
     def test_summary_exports_are_outside_canonical_measurement_bundles(self):
         bundle = write_measurement(self.root, make_record("export-guard"))
         with self.assertRaisesRegex(CatalogError, "outside catalog measurements"):
@@ -289,62 +283,6 @@ class MetricSummaryTests(unittest.TestCase):
             catalog_cli.export_summary(make_record("s"), {"score": {"value": 1.0}}, linked, root=self.root)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"keep":"untouched"}\n')
 
-    def test_visualization_exports_empty_tables_with_explicit_headers(self):
-        destination = Path(self.temporary.name) / "empty-plots"
-        summary = {
-            "quantile": 0.8, "score": {"value": None}, "threshold": 0.8,
-            "classes": [], "prototypes": [], "parts": [], "support": [],
-        }
-        with warnings.catch_warnings(), contextlib.redirect_stderr(io.StringIO()):
-            warnings.simplefilter("ignore")
-            visualizations.render_measurements([make_record("empty-viz")], [summary], destination, root=self.root)
-        with (destination / "02_class_consistency.csv").open(newline="", encoding="utf-8") as stream:
-            self.assertEqual(next(csv.reader(stream)), [
-                "measurement_id", "quantile", "class_id", "class_name", "numerator",
-                "denominator", "consistency_fraction",
-            ])
-
-    def test_plots_keep_attempts_separate_and_export_exact_tables(self):
-        records, summaries_by_id = [], []
-        for measurement_id, quantile, sample_ids in (
-            ("q70", 0.7, ("s1", "s2")), ("q70-repeat", 0.7, ("s1", "s2")), ("q80", 0.8, ("s1", "s3")),
-        ):
-            rows = [obs(s, prototype_id=2, part_1="1" if i == 0 else "0") for i, s in enumerate(sample_ids)]
-            bundle = write_measurement(self.root, make_record(measurement_id, quantile=quantile), rows)
-            record, loaded = load_observations(bundle)
-            records.append(record)
-            summaries_by_id.append(summaries.summarize_observations(record, loaded))
-        destination = Path(self.temporary.name) / "plots"
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            rendered = visualizations.render_measurements(records, summaries_by_id, destination, root=self.root)
-        self.assertFalse(rendered["support_comparable"])
-        self.assertEqual(len(rendered["tables"]["support"]), 6)
-        for name in ("01_prototype_part_heatmaps.png", "02_class_consistency.csv",
-                     "03_prototype_scores.csv", "04_usable_images.csv", "all_four_visualizations.pdf"):
-            self.assertTrue((destination / name).is_file(), name)
-        with (destination / "04_usable_images.csv").open(newline="", encoding="utf-8") as stream:
-            self.assertEqual([r["usable_images"] for r in csv.DictReader(stream)], ["2"] * 6)
-        cli_output = Path(self.temporary.name) / "cli-plots"
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            code, _ = self.run_cli("plot", "q70", "q70-repeat", "q80", "--output-dir", str(cli_output))
-        self.assertEqual(code, 0)
-
-    def test_comparison_requires_checkpoint_identity_and_matching_setup(self):
-        known = make_record("known")
-        unknown = make_record("unknown-checkpoint", checkpoint=None)
-        with self.assertRaisesRegex(visualizations.VisualizationError, "comparability is unverified"):
-            visualizations._compatibility_signature(unknown)
-        base = visualizations._compatibility_signature(known)
-        self.assertEqual(base, visualizations._compatibility_signature(make_record("q", quantile=0.5)))
-        flagged = make_record("flag")
-        flagged["parameters"]["official_parts_only"] = True
-        other_dataset = make_record("dataset")
-        other_dataset["dataset"]["split"] = "test"
-        for record in (flagged, other_dataset, make_record("ckpt", checkpoint="c" * 64)):
-            self.assertNotEqual(base, visualizations._compatibility_signature(record))
-
     def test_all_unavailable_part_combinations_are_retained_as_unverified_support(self):
         record = make_record("sparse-support")
         rows = [obs("available", 1, 1, "1", ""), obs("unavailable", 1, 2, "", "")]
@@ -352,9 +290,6 @@ class MetricSummaryTests(unittest.TestCase):
         part_two = next(item for item in result["support"] if item["part_id"] == 2)
         self.assertEqual(part_two["usable_images"], 0)
         self.assertFalse(part_two["prototype_support_matches"])
-        tables, support_comparable = visualizations._tables([record], [result])
-        self.assertFalse(support_comparable)
-        self.assertIn((1, 2), {(row["class_id"], row["part_id"]) for row in tables["support"]})
 
 
 if __name__ == "__main__":

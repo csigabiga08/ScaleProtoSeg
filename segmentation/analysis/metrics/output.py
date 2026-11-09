@@ -6,8 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
-import platform
-import socket
+import subprocess
 import sys
 import uuid
 
@@ -17,13 +16,22 @@ from segmentation.analysis.metrics.catalog import (
     resolve_catalog_root,
     sha256_file,
 )
-from segmentation.analysis.metrics.provenance import (
-    dataset_provenance,
-    file_identity,
-    package_versions,
-    sanitize_error,
-    source_provenance,
-)
+
+
+def _file_identity(path):
+    absolute = Path(path).expanduser().resolve()
+    digest, size = sha256_file(absolute)
+    return {"path": str(absolute), "bytes": size, "sha256": digest}
+
+
+def _git_commit():
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parent,
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _now():
@@ -103,11 +111,10 @@ class MetricOutput:
         self._observation_counts = {}
         self._active_sample = None
         self._terminal = False
-        self._input_hash_cache = {}
         self._artifacts = {}
-        inputs = {"prototype_checkpoint": file_identity(checkpoint, self._input_hash_cache)}
+        inputs = {"prototype_checkpoint": _file_identity(checkpoint)}
         if group_checkpoint is not None:
-            inputs["group_checkpoint"] = file_identity(group_checkpoint, self._input_hash_cache)
+            inputs["group_checkpoint"] = _file_identity(group_checkpoint)
         self.result = {
             "measurement_id": self.measurement_id,
             "metric": self.metric,
@@ -124,15 +131,7 @@ class MetricOutput:
             "dataset": {"name": data_type, "split": "val"},
             "protocol": protocol,
             "parameters": _json_value(parameters),
-            "execution": {
-                **source_provenance(Path(__file__).resolve().parents[3]),
-                "command": list(sys.argv),
-                "python": platform.python_version(),
-                "python_executable": sys.executable,
-                "packages": package_versions(),
-                "host": socket.gethostname(),
-                "scheduler_job_id": os.environ.get("SLURM_JOB_ID"),
-            },
+            "execution": {"commit": _git_commit(), "command": list(sys.argv)},
             "population": None,
             "selected_prototype_ids": [],
             "scores": {},
@@ -159,13 +158,7 @@ class MetricOutput:
 
     def record_dataset(self, dataset):
         self._ensure_running()
-        checkout = Path(__file__).resolve().parents[3]
-        sample_ids, dataset_fields, parts_fields = dataset_provenance(
-            dataset, self.data_type, checkout, self._input_hash_cache
-        )
-        self.result["dataset"].update(dataset_fields)
-        self.result["protocol"].setdefault("parts", {}).update(parts_fields)
-        self.set_candidates(sample_ids)
+        self.set_candidates(dataset.img_ids)
         self._write_result()
 
     def set_candidates(self, sample_ids):
@@ -186,7 +179,7 @@ class MetricOutput:
 
     def register_input(self, role, path):
         self._ensure_running()
-        self.result["model"]["inputs"][role] = file_identity(path, self._input_hash_cache)
+        self.result["model"]["inputs"][role] = _file_identity(path)
         self._write_result()
 
     def update_model_metadata(self, **fields):
@@ -378,7 +371,7 @@ class MetricOutput:
 
     def fail(self, error):
         self._ensure_running()
-        message = sanitize_error(error)
+        message = str(error)[:500]
         self._finalize_files()
         self.result["status"] = "failed"
         self.result["completed_at_utc"] = _now()
