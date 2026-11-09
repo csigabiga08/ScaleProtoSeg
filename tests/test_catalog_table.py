@@ -68,6 +68,64 @@ class CatalogTableTest(unittest.TestCase):
         diff = table.differing_fields(frame, ["a", "b"], table.input_columns(frame))
         self.assertEqual(list(diff.index), ["score", "numerator", "denominator", "parameters.quantile"])
 
+    def test_boolean_columns_accepts_constant_flags_and_missing_values(self):
+        frame = table.records_frame([
+            record("a", flag=True, other=False, mixed=True),
+            record("b", flag=False, other=False, mixed="legacy"),
+            record("c", other=False),
+        ])
+        self.assertEqual(
+            table.boolean_columns(frame, table.input_columns(frame)),
+            ["parameters.flag", "parameters.other"],
+        )
+
+    def test_compare_flag_pairs_other_inputs_and_preserves_individual_scores(self):
+        frame = table.records_frame([
+            record("a", flag=False, other=True, value=0.2),
+            record("b", flag=True, other=True, value=0.6),
+            record("c", flag=True, other=True, value=0.8),
+            record("d", flag=True, other=True, value=None),
+            record("e", flag=True, other=True, quantile=0.9, value=1.0),
+            record("f", flag=True, other=False, value=0.9),
+            record("g", metric="stability", flag=False, other=True, value=0.1),
+            record("h", other=True, value=1.0),
+            record("i", flag=False, other=True, value=0.3),
+        ])
+        comparison = table.compare_flag(frame, "parameters.flag", [])
+        self.assertEqual(len(comparison), 1)
+        paired = comparison.iloc[0]
+        self.assertEqual(paired[("", "metric")], "consistency")
+        self.assertEqual(paired[("", "parameters.quantile")], "0.8")
+        self.assertEqual(paired[("", "parameters.other")], "true")
+        self.assertEqual(paired[("score", "Off")], [0.2, 0.3])
+        self.assertEqual(paired[("score", "On")], [0.6, 0.8, None])
+        self.assertNotIn("parameters.flag", comparison.columns.get_level_values(1))
+
+    def test_compare_flag_respects_extra_fields_and_empty_filters(self):
+        first = record("a", flag=False)
+        second = record("b", flag=True)
+        first["execution"] = {"commit": "old"}
+        second["execution"] = {"commit": "new"}
+        frame = table.records_frame([first, second])
+        self.assertEqual(len(table.compare_flag(frame, "parameters.flag", [])), 1)
+        comparison = table.compare_flag(frame, "parameters.flag", ["execution.commit"])
+        self.assertTrue(comparison.empty)
+        for empty in (frame.iloc[:0], frame.iloc[:1], table.records_frame([record("c", flag=None)])):
+            comparison = table.compare_flag(empty, "parameters.flag", [])
+            self.assertTrue(comparison.empty)
+            self.assertIn(("score", "Off"), comparison)
+            self.assertIn(("score", "On"), comparison)
+
+    def test_compare_flag_keeps_pairs_even_when_scores_are_missing(self):
+        frame = table.records_frame([
+            record("a", flag=False, value=None),
+            record("b", flag=True, value=None),
+        ])
+        comparison = table.compare_flag(frame, "parameters.flag", [])
+        self.assertEqual(len(comparison), 1)
+        self.assertEqual(comparison.iloc[0][("score", "Off")], [None])
+        self.assertEqual(comparison.iloc[0][("score", "On")], [None])
+
     def test_root_resolution_requires_only_read_access(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

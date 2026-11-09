@@ -336,7 +336,11 @@ read access. Start it from the repository root and forward the port over SSH:
   group checkpoint and every recorded `parameters.*` value), and *Extra fields* adds
   any other varying `result.json` field. Select one row for its metadata, observations
   and hash validation.
-- **Compare**: select several rows to see only the fields that differ, with scores.
+- **Compare**: choose a boolean flag to find catalog entry pairs where every other
+  input (including quantile) and selected extra field matches. The score has
+  **Off**/**On** sub-columns containing lists of the original scores, preserving
+  duplicate entries and missing scores without averaging. Only configurations
+  present on both sides are shown, using the filtered runs.
 - **Aggregate**: group by chosen inputs and average over the rest (e.g. leave
   `parameters.quantile` out to average across quantiles). `mean` is the unweighted
   mean of run scores; `pooled` is Σ numerator / Σ denominator. Groups always include

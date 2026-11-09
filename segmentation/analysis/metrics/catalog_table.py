@@ -150,6 +150,33 @@ def differing_fields(frame, measurement_ids, columns):
     return table
 
 
+def boolean_columns(frame, columns):
+    """Fields containing boolean display values, optionally alongside missing values."""
+    booleans = {"false", "true"}
+    return [
+        column for column in columns
+        if set(frame[column]) & booleans and set(frame[column]) <= booleans | {MISSING}
+    ]
+
+
+def compare_flag(frame, flag, fields):
+    """Pair flag-off/on entries with identical other inputs, preserving every score."""
+    by = list(dict.fromkeys(["metric", *input_columns(frame), *fields]))
+    by.remove(flag)
+    work = frame[frame[flag].isin(["false", "true"])]
+    scores = work.groupby(by + [flag], sort=True)["score"].agg(
+        lambda values: [None if pd.isna(value) else value for value in values]
+    )
+    result = scores.unstack(flag).reindex(columns=["false", "true"]).dropna(subset=["false", "true"])
+    result.columns = pd.MultiIndex.from_tuples([("score", "Off"), ("score", "On")])
+    result = result.reset_index()
+    # Input names belong on leaf headers so their borders can be dragged to resize.
+    result.columns = pd.MultiIndex.from_tuples(
+        [("", column) for column in by] + [("score", "Off"), ("score", "On")]
+    )
+    return result
+
+
 def aggregate(frame, by):
     """Score statistics per group; metric is always a group key so metrics never mix.
 

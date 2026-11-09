@@ -76,7 +76,7 @@ with runs_tab:
                "population.contributing", "population.observations", "created_at_utc", "measurement_id"]
     shown = view[[column for column in dict.fromkeys(columns) if column in view]]
     event = st.dataframe(
-        shown, hide_index=True, on_select="rerun", selection_mode="multi-row", key="runs",
+        shown, hide_index=True, on_select="rerun", selection_mode="single-row", key="runs",
         column_config={"score": st.column_config.NumberColumn(format="%.4f")},
     )
     selected = list(shown.index[event.selection.rows])
@@ -104,18 +104,29 @@ with runs_tab:
                         f"{observations['prototype_id'].nunique()} prototypes"
                     )
                     st.dataframe(observations, hide_index=True, height=400)
-    elif len(selected) > 1:
-        st.info(f"{len(selected)} runs selected — see the Compare tab.")
     else:
-        st.caption("Select one row for details or several rows to compare.")
+        st.caption("Select one row for details. The Compare tab uses all filtered runs.")
 
 with compare_tab:
-    if len(selected) < 2:
-        st.info("Select at least two rows in the Runs tab.")
+    flags = table.boolean_columns(frame, fields)
+    if not flags:
+        st.info("No boolean inputs are available to compare.")
     else:
-        all_fields = st.toggle("Diff every result.json field, not only inputs")
-        candidates = [column for column in frame.columns if column not in table.SCORE_COLUMNS] if all_fields else fields
-        st.dataframe(table.differing_fields(frame, selected, candidates).astype(str))
+        flag = st.selectbox("Compare flag", flags)
+        st.caption(
+            "Matches filtered catalog entries where every input and selected extra field "
+            "except the chosen flag is identical. Only configurations with both Off and On entries are shown."
+        )
+        comparison = table.compare_flag(view, flag, fields)
+        st.dataframe(comparison, hide_index=True)
+        if comparison.empty:
+            st.info("No matching Off/On entries for this flag in the filtered runs.")
+        st.caption(
+            "Score sub-columns: Off = false, On = true. Each cell lists the original run scores "
+            "(including missing scores); duplicate entries are kept, never averaged. "
+            "Drag column borders in the lower header row to resize."
+        )
+        csv_download(comparison, "compare", "compare_csv")
 
 with aggregate_tab:
     st.caption("Groups are formed from the filtered runs; inputs left out of the grouping are averaged over.")
