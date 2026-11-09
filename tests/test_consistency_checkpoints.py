@@ -8,10 +8,20 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, call, patch
 
-import argh
+from pydantic import ValidationError
 
 from segmentation.analysis.metrics import consistency
 from segmentation.analysis.metrics.catalog import CatalogError
+from segmentation.analysis.metrics.protocol import ConsistencyRunInput
+
+
+def run_input(model_name="model", training_phase="push", data_type="pascal", **overrides):
+    return ConsistencyRunInput(
+        model_name=model_name,
+        training_phase=training_phase,
+        data_type=data_type,
+        **overrides,
+    )
 
 
 class DatasetReached(Exception):
@@ -33,18 +43,13 @@ class ConsistencyCheckpointTests(unittest.TestCase):
                 patch.object(consistency, "load_model_checkpoint") as load,
             ):
                 with self.assertRaises(CatalogError):
-                    consistency.run_consistency("model", "push", "pascal")
+                    consistency.run_consistency(run_input())
                 load.assert_not_called()
 
-    def test_output_directory_cli_option_is_removed(self):
+    def test_runner_input_rejects_unknown_fields(self):
         self.assertNotIn("output_dir", inspect.signature(consistency.run_consistency).parameters)
-        with patch.object(consistency, "load_model_checkpoint") as load:
-            with self.assertRaises(SystemExit):
-                argh.dispatch_command(
-                    consistency.run_consistency,
-                    argv=["model", "push", "pascal", "--output-dir", "ignored"],
-                )
-            load.assert_not_called()
+        with self.assertRaises(ValidationError):
+            run_input(output_dir="ignored")
 
     def test_checkpoint_loading_failure_leaves_failed_initialization_record(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
@@ -62,7 +67,7 @@ class ConsistencyCheckpointTests(unittest.TestCase):
                 patch.object(consistency, "load_model_checkpoint", side_effect=ValueError("bad checkpoint")) as load,
             ):
                 with self.assertRaisesRegex(ValueError, "bad checkpoint"):
-                    consistency.run_consistency("model", "push", "pascal")
+                    consistency.run_consistency(run_input())
             load.assert_called_once_with(str(checkpoint))
             bundles = list((catalog_root / "measurements").iterdir())
             self.assertEqual(len(bundles), 1)
@@ -71,21 +76,22 @@ class ConsistencyCheckpointTests(unittest.TestCase):
             self.assertEqual(record["failure"]["type"], "ValueError")
             self.assertEqual(record["population"], {"candidates": None, "contributing": 0, "observations": 0})
 
-    def test_checkpoint_selection_through_cli(self):
+    def test_checkpoint_selection_from_typed_input(self):
         cases = [
-            ([], False, ["model/checkpoints/push_last.pth"], None),
-            (["--group-name", "group"], False,
+            ({}, False, ["model/checkpoints/push_last.pth"], None),
+            ({"group_name": "group"}, False,
              ["model/checkpoints/push_last.pth", "group/checkpoints/th-0.05-nopush-group_last.pth"], "group"),
-            (["--checkpoint", "custom/best.pth"], False, ["custom/best.pth"], None),
-            (["--checkpoint", "custom/best.pth"], True, ["custom/best.pth"], "model"),
-            (["--group-name", "group", "--group-checkpoint", "custom/group.pth"], False,
+            ({"checkpoint": "custom/best.pth"}, False, ["custom/best.pth"], None),
+            ({"checkpoint": "custom/best.pth"}, True, ["custom/best.pth"], "model"),
+            ({"group_name": "group", "group_checkpoint": "custom/group.pth"}, False,
              ["model/checkpoints/push_last.pth", "custom/group.pth"], "group"),
-            (["--checkpoint", "custom/best.pth", "--group-checkpoint", "custom/group.pth"], True,
+            ({"checkpoint": "custom/best.pth", "group_checkpoint": "custom/group.pth"}, True,
              ["custom/best.pth", "custom/group.pth"], "group"),
         ]
-        for flags, grouped, paths, filter_source in cases:
-            with self.subTest(flags=flags, grouped=grouped), tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
+        for overrides, grouped, paths, filter_source in cases:
+            with self.subTest(overrides=overrides, grouped=grouped), tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
                 root = Path(root)
+                overrides = dict(overrides)
                 catalog_root = root / "catalog"
                 catalog_root.mkdir()
                 for relative in (
@@ -97,10 +103,9 @@ class ConsistencyCheckpointTests(unittest.TestCase):
                     checkpoint = root / relative
                     checkpoint.parent.mkdir(parents=True, exist_ok=True)
                     checkpoint.write_bytes(b"fixture checkpoint bytes")
-                flags = list(flags)
-                for index, value in enumerate(flags[:-1]):
-                    if value in ("--checkpoint", "--group-checkpoint"):
-                        flags[index + 1] = str(root / flags[index + 1])
+                for name in ("checkpoint", "group_checkpoint"):
+                    if name in overrides:
+                        overrides[name] = str(root / overrides[name])
                 paths = [str(root / path) if path.startswith("custom/") else path for path in paths]
                 model = MagicMock()
                 model.cuda.return_value = model
@@ -117,8 +122,8 @@ class ConsistencyCheckpointTests(unittest.TestCase):
                     patch.object(consistency, "PatchClassificationDataset", side_effect=DatasetReached),
                 ):
                     with self.assertRaises(DatasetReached):
-                        argh.dispatch_command(
-                            consistency.run_consistency, argv=["model", "push", "cityscapes", *flags]
+                        consistency.run_consistency(
+                            run_input(data_type="cityscapes", **overrides)
                         )
                     self.assertEqual(load.call_args_list, [call(os.path.join(root, p)) for p in paths])
                     if filter_source is None:

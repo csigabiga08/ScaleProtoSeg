@@ -7,13 +7,31 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-import argh
+from hydra import compose, initialize_config_dir
+from hydra.errors import ConfigCompositionException
 import numpy as np
 import torch
 from PIL import Image
+from pydantic import ValidationError
 
 from segmentation.analysis.metrics import consistency
+from segmentation.analysis.metrics.protocol import ConsistencyRunInput
 from segmentation.data.cityscapes_parts import filter_official_parts
+
+
+def run_input(model_name="model", training_phase="push", data_type="pascal", **overrides):
+    return ConsistencyRunInput(
+        model_name=model_name,
+        training_phase=training_phase,
+        data_type=data_type,
+        **overrides,
+    )
+
+
+def hydra_config_directory():
+    return str(
+        (Path(consistency.__file__).resolve().parent / "../../../config/hydra/metrics").resolve()
+    )
 
 
 def latest_record(root):
@@ -51,14 +69,129 @@ class ConsistencyPartsTests(unittest.TestCase):
         observation = output.add_observation.call_args.kwargs
         self.assertEqual(observation["class_id"], 2)
 
-        protocol = consistency._protocol(
-            "consistency", "pascal", {1: "aeroplane"}, consistency.PASCAL_ID_MAPPING,
-            max_parts, quantile=0.8, threshold=0.8, official_parts_only=False,
-            require_semantic_match=False, exclude_background_centroid=False,
+        protocol = run_input(
+            quantile=0.7,
+            threshold=0.9,
+            require_semantic_match=True,
+            exclude_background_centroid=True,
+        ).to_protocol(
+            semantic_id_to_evaluation_id=consistency.PASCAL_ID_MAPPING,
+            evaluation_class_id_to_label={"2": "aeroplane"},
+            valid_part_ids=range(1, max_parts + 1),
+            observation_columns=[f"part_{part_id}" for part_id in range(max_parts + 1)],
+            excluded_evaluation_class_ids=consistency.PASCAL_FILTER_CLASS,
         )
-        self.assertEqual(protocol["classes"]["evaluation_class_id_to_label"], {"2": "aeroplane"})
-        self.assertEqual(protocol["classes"]["background_evaluation_class_id"], 1)
-        self.assertIn(1, protocol["classes"]["excluded_evaluation_class_ids"])
+        self.assertEqual(
+            protocol,
+            {
+                "metric": "consistency",
+                "quantile": 0.7,
+                "parts": {
+                    "valid_part_ids": list(range(1, max_parts + 1)),
+                    "official_parts_only": False,
+                    "require_semantic_match": True,
+                    "exclude_background_centroid": True,
+                },
+                "classes": {
+                    "semantic_id_to_evaluation_id": consistency.PASCAL_ID_MAPPING,
+                    "evaluation_class_id_to_label": {"2": "aeroplane"},
+                    "background_evaluation_class_id": 1,
+                    "excluded_evaluation_class_ids": [1, 5, 10, 12, 19],
+                },
+                "consistency": {
+                    "threshold": 0.9,
+                    "aggregation": "unweighted mean over class/prototype rows",
+                },
+                "observation_columns": [f"part_{i}" for i in range(max_parts + 1)],
+            },
+        )
+
+    def test_cityscapes_protocol_has_no_excluded_classes(self):
+        protocol = run_input(data_type="cityscapes").to_protocol(
+            semantic_id_to_evaluation_id=consistency.CITYSCAPES_19_EVAL_CATEGORIES,
+            evaluation_class_id_to_label={"2": "person"},
+            valid_part_ids=range(1, consistency.MAX_PARTS_CITY + 1),
+            observation_columns=[f"part_{part_id}" for part_id in range(consistency.MAX_PARTS_CITY + 1)],
+            excluded_evaluation_class_ids=[],
+        )
+        self.assertEqual(
+            protocol["parts"]["valid_part_ids"],
+            list(range(1, consistency.MAX_PARTS_CITY + 1)),
+        )
+        self.assertEqual(protocol["classes"]["background_evaluation_class_id"], None)
+        self.assertEqual(protocol["classes"]["excluded_evaluation_class_ids"], [])
+        self.assertEqual(protocol["quantile"], 0.8)
+
+    def test_hydra_composes_overrides_and_hands_typed_input_to_runner(self):
+        with initialize_config_dir(config_dir=hydra_config_directory(), version_base=None):
+            config = compose(
+                config_name="consistency",
+                overrides=[
+                    "model_name=network",
+                    "training_phase=push",
+                    "data_type=pascal",
+                    "quantile=0.7",
+                    "threshold=0.9",
+                    "require_semantic_match=true",
+                    "exclude_background_centroid=true",
+                ],
+            )
+        with patch.object(consistency, "run_consistency") as runner:
+            consistency._run_config(config)
+        runner.assert_called_once()
+        model = runner.call_args.args[0]
+        self.assertIsInstance(model, ConsistencyRunInput)
+        self.assertEqual(model.model_name, "network")
+        self.assertEqual(model.training_phase, "push")
+        self.assertEqual(model.data_type, "pascal")
+        self.assertEqual(model.quantile, 0.7)
+        self.assertEqual(model.threshold, 0.9)
+        self.assertTrue(model.require_semantic_match)
+        self.assertTrue(model.exclude_background_centroid)
+
+    def test_hydra_config_defaults_and_required_model_fields(self):
+        with initialize_config_dir(config_dir=hydra_config_directory(), version_base=None):
+            config = compose(config_name="consistency")
+        self.assertEqual(config.quantile, 0.8)
+        self.assertEqual(config.threshold, 0.8)
+        self.assertFalse(config.official_parts_only)
+        self.assertFalse(config.require_semantic_match)
+        self.assertFalse(config.exclude_background_centroid)
+        with self.assertRaises(ValidationError):
+            consistency._run_config(config)
+
+    def test_hydra_entrypoint_discovers_config_without_changing_directory(self):
+        cwd = Path.cwd()
+        entries = set(cwd.iterdir())
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "consistency",
+                    "model_name=network",
+                    "training_phase=push",
+                    "data_type=pascal",
+                ],
+            ),
+            patch.object(consistency, "_run_config") as handoff,
+        ):
+            consistency.main()
+        handoff.assert_called_once()
+        self.assertEqual(Path.cwd(), cwd)
+        self.assertEqual(set(cwd.iterdir()), entries)
+
+    def test_hydra_rejects_unknown_override(self):
+        with initialize_config_dir(config_dir=hydra_config_directory(), version_base=None):
+            with self.assertRaises(ConfigCompositionException):
+                compose(
+                    config_name="consistency",
+                    overrides=[
+                        "model_name=network",
+                        "training_phase=push",
+                        "data_type=pascal",
+                        "unknown_option=true",
+                    ],
+                )
 
     def test_evaluator_switches_modes_without_changing_cache(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
@@ -94,17 +227,21 @@ class ConsistencyPartsTests(unittest.TestCase):
                 patch.object(consistency, "part_intersect", return_value=({}, [observation])) as intersect,
             ):
                 # The default mode must work even without an SIDS cache.
-                consistency.run_consistency("model", "push", "cityscapes")
+                consistency.run_consistency(run_input(data_type="cityscapes"))
                 np.testing.assert_array_equal(intersect.call_args.args[2], original_parts)
                 unfiltered_bundle, unfiltered = latest_record(catalog_root)
                 self.assertEqual(unfiltered["status"], "complete")
                 unfiltered_score = unfiltered["scores"]["consistency"]["value"]
 
                 with self.assertRaises(FileNotFoundError):
-                    consistency.run_consistency("model", "push", "cityscapes", official_parts_only=True)
+                    consistency.run_consistency(
+                        run_input(data_type="cityscapes", official_parts_only=True)
+                    )
 
                 np.save(native_dir / "sample.npy", [[24, 24, 25, 26, 31]])
-                consistency.run_consistency("model", "push", "cityscapes", official_parts_only=True)
+                consistency.run_consistency(
+                    run_input(data_type="cityscapes", official_parts_only=True)
+                )
                 np.testing.assert_array_equal(intersect.call_args.args[2], [[4, -1, -1, 5, -1]])
                 filtered_bundle, filtered = latest_record(catalog_root)
                 self.assertEqual(filtered["status"], "complete")
@@ -116,7 +253,7 @@ class ConsistencyPartsTests(unittest.TestCase):
     def test_official_flag_rejects_pascal_before_loading_model(self):
         with patch.object(consistency, "load_model_checkpoint") as load_model:
             with self.assertRaisesRegex(ValueError, "only for cityscapes"):
-                consistency.run_consistency("model", "push", "pascal", official_parts_only=True)
+                consistency.run_consistency(run_input(official_parts_only=True))
             load_model.assert_not_called()
 
     def test_pascal_semantic_match_cli_preserves_legacy_results_and_cache(self):
@@ -155,21 +292,18 @@ class ConsistencyPartsTests(unittest.TestCase):
                 patch.object(consistency, "part_intersect", return_value=({}, [observation])) as intersect,
             ):
                 # Legacy mode needs no panoptic semantic cache.
-                consistency.run_consistency("model", "push", "pascal")
+                consistency.run_consistency(run_input())
                 np.testing.assert_array_equal(intersect.call_args.args[2], original_parts)
                 legacy_bundle, legacy_record = latest_record(catalog_root)
                 legacy_score = legacy_record["scores"]["consistency"]["value"]
 
                 with self.assertRaises(FileNotFoundError):
-                    consistency.run_consistency("model", "push", "pascal", require_semantic_match=True)
+                    consistency.run_consistency(run_input(require_semantic_match=True))
 
                 # A bicycle saddle (PID 3) inside the VOC person mask must be removed;
                 # a true person right-eye pixel (also PID 3) must survive the ID shift.
                 np.save(native_dir / "sample.npy", [[2, 15, 2, 0, 15, 15, 20, 16]])
-                argh.dispatch_command(
-                    consistency.run_consistency,
-                    argv=["model", "push", "pascal", "--require-semantic-match"],
-                )
+                consistency.run_consistency(run_input(require_semantic_match=True))
                 np.testing.assert_array_equal(intersect.call_args.args[2], [[0, 3, 3, 0, 0, 0, 2, 0]])
                 np.testing.assert_array_equal(intersect.call_args.args[1], [[16, 16, 3, 1, 0, 16, 21, 16]])
                 semantic_bundle, semantic_record = latest_record(catalog_root)
@@ -179,9 +313,11 @@ class ConsistencyPartsTests(unittest.TestCase):
                 self.assertNotEqual(semantic_bundle, legacy_bundle)
                 self.assertEqual(part_path.read_bytes(), original_bytes)
 
-                argh.dispatch_command(
-                    consistency.run_consistency,
-                    argv=["model", "push", "pascal", "--require-semantic-match", "--exclude-background-centroid"],
+                consistency.run_consistency(
+                    run_input(
+                        require_semantic_match=True,
+                        exclude_background_centroid=True,
+                    )
                 )
                 self.assertTrue(intersect.call_args.kwargs["exclude_background_centroid"])
                 _, foreground_record = latest_record(catalog_root)
@@ -190,12 +326,14 @@ class ConsistencyPartsTests(unittest.TestCase):
                 # Reject shapes which NumPy would otherwise silently broadcast.
                 np.save(native_dir / "sample.npy", [[15]])
                 with self.assertRaisesRegex(ValueError, "matching shapes"):
-                    consistency.run_consistency("model", "push", "pascal", require_semantic_match=True)
+                    consistency.run_consistency(run_input(require_semantic_match=True))
 
     def test_semantic_match_flag_rejects_cityscapes_before_loading_model(self):
         with patch.object(consistency, "load_model_checkpoint") as load_model:
             with self.assertRaisesRegex(ValueError, "only for pascal"):
-                consistency.run_consistency("model", "push", "cityscapes", require_semantic_match=True)
+                consistency.run_consistency(
+                    run_input(data_type="cityscapes", require_semantic_match=True)
+                )
             load_model.assert_not_called()
 
     def test_background_centroid_can_create_a_false_part_hit(self):
@@ -252,7 +390,7 @@ class ConsistencyPartsTests(unittest.TestCase):
                 patch.object(consistency, "PatchClassificationDataset", return_value=dataset),
                 patch.object(consistency, "part_intersect", return_value=({}, [])),
             ):
-                consistency.run_consistency("model", "push", "pascal")
+                consistency.run_consistency(run_input())
 
             bundle, record = latest_record(catalog_root)
             self.assertEqual(record["status"], "complete")
@@ -288,7 +426,7 @@ class ConsistencyPartsTests(unittest.TestCase):
                 patch.object(consistency, "PatchClassificationDataset", return_value=dataset),
             ):
                 with self.assertRaises(ValueError):
-                    consistency.run_consistency("model", "push", "pascal")
+                    consistency.run_consistency(run_input())
 
             bundle, record = latest_record(catalog_root)
             self.assertEqual(record["status"], "failed")
