@@ -79,44 +79,6 @@ def validate_result(result):
     return result
 
 
-def ensure_external_output(path, root=None):
-    """Reject symlinks and derived output inside canonical measurement storage."""
-    requested = Path(path).expanduser()
-    if requested.is_symlink():
-        raise CatalogError(f"Derived export destination cannot be a symlink: {requested}")
-    target = requested.resolve()
-    root = Path(root) if root is not None else resolve_catalog_root()
-    canonical = (root / "measurements").resolve()
-    if target == canonical or canonical in target.parents:
-        raise CatalogError(f"Derived exports must be outside catalog measurements: {target}")
-    return target
-
-
-def create_fresh_output_dir(path, root=None):
-    output_dir = ensure_external_output(path, root)
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        output_dir.mkdir()
-    except FileExistsError as error:
-        raise CatalogError(
-            f"Derived output directory must not already exist; choose a fresh path: {output_dir}"
-        ) from error
-    return output_dir
-
-
-def write_derived_csv(path, rows, columns):
-    """Write a caller-defined CSV table to a new derived artifact."""
-    with Path(path).open("x", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=columns)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({
-                key: json.dumps(value, ensure_ascii=False)
-                if isinstance(value, (list, dict)) else value
-                for key, value in row.items()
-            })
-
-
 def _read_observations(path, columns):
     try:
         with Path(path).open(newline="", encoding="utf-8") as stream:

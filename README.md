@@ -282,39 +282,25 @@ Slurm wrapper uses the submit checkout from `SLURM_SUBMIT_DIR` (or `PWD`) unless
 `SCALEPROTOSEG_ROOT` is explicitly set, and runs `METRIC_PYTHON` when configured
 (otherwise `.venv/bin/python`).
 
-List and filter complete measurements without opening observation tables, checkpoints,
-or model code:
+List complete measurements without opening observation tables, checkpoints, or
+model code:
 
 ```bash
 .venv/bin/python -m segmentation.analysis.metrics.catalog_cli list \
   --metric consistency --dataset pascal --quantile 0.8 \
   --variant protocol.consistency.threshold=0.8
-.venv/bin/python -m segmentation.analysis.metrics.catalog_cli filter \
-  --all-status --status failed
 ```
 
 Running and failed measurements remain discoverable with `--all-status`; direct
 non-complete status filters also require that opt-in. Summaries default to complete
 records; finalized failed records may be inspected with `summarize --all-status`,
-but running records cannot be summarized. Export a flat comparison table of the
-selected records:
+but running records cannot be summarized.
 
-```bash
-.venv/bin/python -m segmentation.analysis.metrics.catalog_cli export \
-  --metric consistency --output /path/to/analysis/consistency.csv
-```
-
-Flat CSV exports refuse an existing destination file. Summary exports
-require a new output directory; choose a different path for each run rather than
-reusing a directory, which avoids overwriting symlink targets or mixing stale tables.
-
-Validate a selected record, recompute its exact metric aggregates, or save derived
-summary tables outside the canonical catalog bundle:
+Validate a record, or recompute its exact metric aggregates (printed as JSON):
 
 ```bash
 .venv/bin/python -m segmentation.analysis.metrics.catalog_cli validate <measurement-id>
-.venv/bin/python -m segmentation.analysis.metrics.catalog_cli summarize <measurement-id> \
-  --output-dir /path/to/analysis/<measurement-id>
+.venv/bin/python -m segmentation.analysis.metrics.catalog_cli summarize <measurement-id>
 ```
 
 Consistency summaries use the recorded aggregation rule:

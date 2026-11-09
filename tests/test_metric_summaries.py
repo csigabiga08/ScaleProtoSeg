@@ -14,7 +14,7 @@ from unittest.mock import patch
 import warnings
 
 from segmentation.analysis.metrics import catalog_cli, summaries
-from segmentation.analysis.metrics.catalog import CatalogError, load_observations, write_derived_csv
+from segmentation.analysis.metrics.catalog import CatalogError, load_observations
 
 
 CONSISTENCY_PROTOCOL = {
@@ -152,19 +152,16 @@ class MetricSummaryTests(unittest.TestCase):
         (bundle / "observations.csv").unlink()
         self.assertEqual(catalog_cli.find_records()[0]["measurement_id"], "metadata-only")
 
-    def test_cli_list_filter_export_validate_and_summarize_commands(self):
+    def test_cli_list_validate_and_summarize_commands(self):
         write_measurement(self.root, make_record("cli"), [obs("a"), obs("b")])
-        outside = Path(self.temporary.name) / "exports"
         code, text = self.run_cli("list")
         self.assertEqual((code, json.loads(text)[0]["measurement_id"]), (0, "cli"))
-        self.assertEqual(json.loads(self.run_cli("filter", "--metric", "stability")[1]), [])
-        self.assertEqual(self.run_cli("export", "--output", str(outside / "records.csv"))[0], 0)
-        self.assertTrue((outside / "records.csv").is_file())
+        self.assertEqual(json.loads(self.run_cli("list", "--metric", "stability")[1]), [])
         code, text = self.run_cli("validate", "cli")
         self.assertEqual((code, json.loads(text)[0]["status"]), (0, "valid"))
-        code, _ = self.run_cli("summarize", "cli", "--output-dir", str(outside / "summary"))
+        code, text = self.run_cli("summarize", "cli")
         self.assertEqual(code, 0)
-        summary = json.loads((outside / "summary" / "summary.json").read_text())
+        summary = json.loads(text)
         self.assertEqual(summary["score"]["value"], 1.0)
 
     def test_validate_reports_invalid_bundles(self):
@@ -248,40 +245,6 @@ class MetricSummaryTests(unittest.TestCase):
         self.assertEqual(result["score"], {"value": 1 / 3, "numerator": 1, "denominator": 3, "unit": "fraction"})
         self.assertFalse(result["stability_rows"][1]["stable"])
         self.assertEqual(result["stability_rows"][1]["part_equalities"], [None, True])
-
-    def test_summary_exports_are_outside_canonical_measurement_bundles(self):
-        bundle = write_measurement(self.root, make_record("export-guard"))
-        with self.assertRaisesRegex(CatalogError, "outside catalog measurements"):
-            catalog_cli.ensure_external_output(bundle / "result.json", self.root)
-
-    def test_derived_csv_writer_preserves_headers_unicode_nulls_and_nested_values(self):
-        destination = Path(self.temporary.name) / "derived.csv"
-        write_derived_csv(destination, [{"label": "café", "empty": None, "metadata": {"雪": ["é", 2]}}],
-                          ["label", "empty", "metadata"])
-        with destination.open(newline="", encoding="utf-8") as stream:
-            reader = csv.DictReader(stream)
-            row = next(reader)
-        self.assertEqual(reader.fieldnames, ["label", "empty", "metadata"])
-        self.assertEqual(row, {"label": "café", "empty": "", "metadata": '{"雪": ["é", 2]}'})
-
-    def test_summary_export_omits_empty_tables_and_refuses_reuse_or_symlinks(self):
-        destination = Path(self.temporary.name) / "summary-tables"
-        summary = {"score": {"value": 1.0}, "classes": [{"label": "café", "value": 1.0}], "parts": []}
-        catalog_cli.export_summary(make_record("s"), summary, destination, root=self.root)
-        self.assertEqual({p.name for p in destination.iterdir()}, {"summary.json", "classes.csv"})
-        before = (destination / "classes.csv").read_bytes()
-        with self.assertRaises(CatalogError):
-            catalog_cli.export_summary(make_record("s"), {"score": {"value": None}}, destination, root=self.root)
-        self.assertEqual((destination / "classes.csv").read_bytes(), before)
-
-        linked = Path(self.temporary.name) / "linked"
-        linked.mkdir()
-        sentinel = Path(self.temporary.name) / "sentinel.json"
-        sentinel.write_text('{"keep":"untouched"}\n', encoding="utf-8")
-        (linked / "summary.json").symlink_to(sentinel)
-        with self.assertRaises(CatalogError):
-            catalog_cli.export_summary(make_record("s"), {"score": {"value": 1.0}}, linked, root=self.root)
-        self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"keep":"untouched"}\n')
 
     def test_all_unavailable_part_combinations_are_retained_as_unverified_support(self):
         record = make_record("sparse-support")

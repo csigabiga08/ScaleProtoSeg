@@ -1,21 +1,17 @@
-"""Metadata-only query and explicit derived-export commands for the metric catalog."""
+"""Metadata-only query, validation and summary commands for the metric catalog."""
 
 import argparse
-import csv
 import json
 from pathlib import Path
 import sys
 
 from segmentation.analysis.metrics.catalog import (
     CatalogError,
-    create_fresh_output_dir,
-    ensure_external_output,
     load_measurement,
     load_observations,
     read_result,
     resolve_catalog_root,
     validate_result,
-    write_derived_csv,
 )
 from segmentation.analysis.metrics.summaries import SummaryError, summarize_observations
 
@@ -132,60 +128,12 @@ def find_measurement(root, measurement_id):
     return bundle, record
 
 
-def _flatten(value, prefix=""):
-    flattened = {}
-    if isinstance(value, dict):
-        for key, child in value.items():
-            name = f"{prefix}.{key}" if prefix else str(key)
-            flattened.update(_flatten(child, name))
-    elif isinstance(value, list):
-        flattened[prefix] = json.dumps(value, ensure_ascii=False, sort_keys=True)
-    else:
-        flattened[prefix] = value
-    return flattened
-
-
-def export_records(records, output, root=None):
-    output = ensure_external_output(output, root)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    records = list(records)
-    flattened = [_flatten(record) for record in records]
-    keys = sorted({key for row in flattened for key in row})
-    try:
-        with output.open("x", newline="", encoding="utf-8") as stream:
-            writer = csv.DictWriter(stream, fieldnames=keys)
-            writer.writeheader()
-            writer.writerows(flattened)
-    except FileExistsError as error:
-        raise CatalogError(f"Derived export file already exists: {output}") from error
-    return output
-
-
 def validate_measurement(bundle):
     """Validate metadata, artifact integrity and observation counts; return the verdict."""
     try:
         return {"measurement_id": load_measurement(bundle)["measurement_id"], "status": "valid"}
     except CatalogError as error:
         return {"measurement_id": Path(bundle).name, "status": "invalid", "error": str(error)}
-
-
-def export_summary(result, summary, output_dir, root=None):
-    output_dir = create_fresh_output_dir(output_dir, root)
-    with (output_dir / "summary.json").open("x", encoding="utf-8") as stream:
-        stream.write(json.dumps(summary, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
-    tables = {
-        "classes.csv": summary.get("classes", []),
-        "prototypes.csv": summary.get("prototypes", []),
-        "parts.csv": summary.get("parts", []),
-        "support.csv": summary.get("support", []),
-        "stability_rows.csv": summary.get("stability_rows", []),
-    }
-    for name, rows in tables.items():
-        if not rows:
-            continue
-        columns = list(rows[0])
-        write_derived_csv(output_dir / name, rows, columns)
-    return output_dir
 
 
 def _filter_arguments(parser):
@@ -201,18 +149,13 @@ def _filter_arguments(parser):
 def _command_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("list", "filter"):
-        listing = commands.add_parser(name, help="List metadata (default: complete measurements only).")
-        _filter_arguments(listing)
-    export = commands.add_parser("export", help="Export filtered metadata to a flat comparison CSV.")
-    _filter_arguments(export)
-    export.add_argument("--output", required=True, type=Path)
+    listing = commands.add_parser("list", help="List metadata (default: complete measurements only).")
+    _filter_arguments(listing)
     validate = commands.add_parser("validate", help="Validate selected metadata and canonical artifacts.")
     validate.add_argument("measurement_ids", nargs="*")
     validate.add_argument("--all-status", action="store_true")
     summarize = commands.add_parser("summarize", help="Recompute one measurement's metric from observations.")
     summarize.add_argument("measurement_id")
-    summarize.add_argument("--output-dir", type=Path)
     summarize.add_argument(
         "--all-status",
         action="store_true",
@@ -238,12 +181,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         root = configured_catalog_root()
-        if args.command in ("list", "filter", "export"):
+        if args.command == "list":
             records = find_records(root, **_filters(args))
-            if args.command == "export":
-                print(export_records(records, args.output, root))
-            else:
-                print(json.dumps(records, indent=2, ensure_ascii=False, allow_nan=False))
+            print(json.dumps(records, indent=2, ensure_ascii=False, allow_nan=False))
             return 0
         if args.command == "validate":
             selected = (
@@ -267,10 +207,7 @@ def main(argv=None):
                     "to inspect a failed record"
                 )
             summary = summarize_observations(result, rows)
-            if args.output_dir:
-                print(export_summary(result, summary, args.output_dir, root))
-            else:
-                print(json.dumps(summary, indent=2, ensure_ascii=False, allow_nan=False))
+            print(json.dumps(summary, indent=2, ensure_ascii=False, allow_nan=False))
             return 0
     except (CatalogError, SummaryError, OSError, ValueError) as error:
         parser.exit(2, f"{parser.prog}: error: {error}\n")
