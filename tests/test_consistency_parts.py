@@ -225,7 +225,7 @@ class ConsistencyPartsTests(unittest.TestCase):
         self.assertEqual(legacy[0][1], 1)
         self.assertEqual(foreground[0][1], 0)
 
-    def test_population_tracks_missing_annotations_and_empty_observations(self):
+    def test_population_counts_missing_annotations_and_empty_observations(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
             root = Path(tmp)
             catalog_root = prepare_run(root)
@@ -261,11 +261,11 @@ class ConsistencyPartsTests(unittest.TestCase):
                 record["scores"]["consistency"]["reason"],
                 "no eligible class/prototype observations",
             )
-            self.assertEqual(record["population"]["excluded"], 1)
+            self.assertEqual(record["population"]["candidates"], 2)
             self.assertEqual(record["population"]["contributing"], 0)
             self.assertEqual(record["population"]["observations"], 0)
 
-    def test_processing_error_publishes_failed_and_unattempted_candidates(self):
+    def test_processing_error_publishes_failed_record(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
             root = Path(tmp)
             catalog_root = prepare_run(root)
@@ -292,8 +292,7 @@ class ConsistencyPartsTests(unittest.TestCase):
 
             bundle, record = latest_record(catalog_root)
             self.assertEqual(record["status"], "failed")
-            self.assertEqual(record["population"]["failed"], 1)
-            self.assertEqual(record["population"]["not_attempted"], 1)
+            self.assertEqual(record["population"]["candidates"], 2)
             self.assertEqual(record["failure"]["type"], "ValueError")
 
 

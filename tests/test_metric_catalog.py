@@ -51,12 +51,9 @@ class MetricCatalogTests(unittest.TestCase):
     def finished_bundle(self):
         output = self.make_output()
         output.set_candidates(["used", "other"])
-        output.start_sample("used")
         output.add_observation(
             sample_id="used", class_id=3, prototype_id=12, repetition=0, part_1=1, part_2=None, part_3=0,
         )
-        output.complete_sample("used")
-        output.mark_excluded("other")
         output.finish(value=1.0, numerator=1, denominator=1)
         return output.path
 
@@ -116,14 +113,9 @@ class MetricCatalogTests(unittest.TestCase):
             output = self.make_output(quantile=0.8, seed=41)
             self.assertEqual(output.result["status"], "running")
             output.set_candidates(["missing", "empty", "used"])
-            output.mark_excluded("missing")
-            output.start_sample("empty")
-            output.complete_sample("empty")
-            output.start_sample("used")
             output.add_observation(
                 sample_id="used", class_id=3, prototype_id=12, repetition=0, part_1=1, part_2=None, part_3=0,
             )
-            output.complete_sample("used")
             output.set_selected_prototype_ids([12, 19])
             output.finish(value=0.5, numerator=1, denominator=2)
 
@@ -136,10 +128,7 @@ class MetricCatalogTests(unittest.TestCase):
                 {"value": 0.5, "unit": "fraction", "numerator": 1, "denominator": 2},
             )
             self.assertEqual(record["parameters"], {"quantile": 0.8, "seed": 41})
-            self.assertEqual(record["population"], {
-                "candidates": 3, "contributing": 1, "excluded": 1, "failed": 0,
-                "not_attempted": 0, "observations": 1,
-            })
+            self.assertEqual(record["population"], {"candidates": 3, "contributing": 1, "observations": 1})
             self.assertEqual(record["selected_prototype_ids"], [12, 19])
             artifact = record["artifacts"]["observations"]
             self.assertEqual(artifact["bytes"], (bundle / "observations.csv").stat().st_size)
@@ -237,7 +226,6 @@ class MetricCatalogTests(unittest.TestCase):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output()
             output.set_candidates(["first", "later"])
-            output.start_sample("first")
             output.add_observation(
                 sample_id="first", class_id=1, prototype_id=4, repetition=0, part_1=0, part_2=1, part_3=None,
             )
@@ -245,8 +233,7 @@ class MetricCatalogTests(unittest.TestCase):
             record, rows = load_observations(output.path)
             self.assertEqual(record["status"], "failed")
             self.assertEqual(record["failure"]["type"], "RuntimeError")
-            self.assertEqual(record["population"]["failed"], 1)
-            self.assertEqual(record["population"]["not_attempted"], 1)
+            self.assertEqual(record["population"]["candidates"], 2)
             self.assertEqual(len(rows), 1)
 
     def test_failed_measurement_records_error(self):
@@ -256,22 +243,15 @@ class MetricCatalogTests(unittest.TestCase):
             record = json.loads((output.path / "result.json").read_text())
             self.assertEqual(record["failure"], {"type": "RuntimeError", "message": "boom"})
 
-    def test_writer_rejects_invalid_observations_and_unattempted_completion(self):
+    def test_writer_rejects_invalid_observations(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output()
-            output.set_candidates(["sample", "pending"])
-            output.start_sample("sample")
             row = dict(sample_id="sample", class_id=1, prototype_id=4, repetition=0, part_1=0, part_2=1, part_3=None)
             output.add_observation(**row)
             with self.assertRaisesRegex(CatalogError, "Duplicate"):
                 output.add_observation(**row)
             with self.assertRaisesRegex(CatalogError, "zero, one, or unavailable"):
                 output.add_observation(**{**row, "repetition": 1, "part_1": 0.5})
-            with self.assertRaisesRegex(CatalogError, "outside the candidate population"):
-                output.add_observation(**{**row, "sample_id": "unknown"})
-            output.complete_sample("sample")
-            with self.assertRaisesRegex(CatalogError, "unattempted"):
-                output.finish(value=1.0, numerator=1, denominator=1)
 
     def test_terminal_records_cannot_be_modified(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):

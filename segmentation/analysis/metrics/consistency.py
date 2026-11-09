@@ -257,11 +257,10 @@ def run_consistency(
             path_cls = Path(val_dataset.annotations_dir)
             path_part = str(path_cls.parent) + f"_PIDS/{path_cls.name}"
 
+            # Pascal parts cover only a subset of the validation images.
             if not os.path.exists(os.path.join(path_part, img_id + ".npy")):
-                output.mark_excluded(img_id)
                 continue
 
-            output.start_sample(img_id)
             part_ann = np.load(os.path.join(path_part, img_id + ".npy"))
             if official_parts_only:
                 sids_path = path_cls.parent.parent / "annotations_SIDS" / path_cls.name / f"{img_id}.npy"
@@ -286,7 +285,6 @@ def run_consistency(
 
             tot_presence.extend(part_presence_list)
             _add_observations(output, part_presence_list, cls2name, MAX_PARTS)
-            output.complete_sample(img_id)
 
         part_columns = [f"part_{i}" for i in range(MAX_PARTS + 1)]
         df_presence = pd.DataFrame(tot_presence, columns=part_columns + ["proto_id", "class", "img_id"])

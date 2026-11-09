@@ -69,7 +69,7 @@ class ConsistencyCheckpointTests(unittest.TestCase):
             record = json.loads((bundles[0] / "result.json").read_text())
             self.assertEqual(record["status"], "failed")
             self.assertEqual(record["failure"]["type"], "ValueError")
-            self.assertEqual(record["artifacts"], {})
+            self.assertEqual(record["population"], {"candidates": None, "contributing": 0, "observations": 0})
 
     def test_checkpoint_selection_through_cli(self):
         cases = [

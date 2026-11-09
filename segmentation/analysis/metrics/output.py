@@ -95,11 +95,10 @@ class MetricOutput:
         self.observation_table_columns = list(OBSERVATION_KEY) + self.observation_columns
         if len(set(self.observation_table_columns)) != len(self.observation_table_columns):
             raise CatalogError("Observation table column names must be unique")
-        self._states = None
+        self._candidate_count = None
         self._observations = []
         self._observation_keys = set()
         self._observation_counts = {}
-        self._active_sample = None
         self._terminal = False
         self._artifacts = {}
         inputs = {"prototype_checkpoint": _file_identity(checkpoint)}
@@ -153,13 +152,8 @@ class MetricOutput:
 
     def set_candidates(self, sample_ids):
         self._ensure_running()
-        if self._states is not None:
-            raise CatalogError("Candidate population has already been registered")
-        candidates = [str(sample_id) for sample_id in sample_ids]
-        if len(set(candidates)) != len(candidates):
-            raise CatalogError("Candidate sample IDs must be unique")
-        self._states = dict.fromkeys(candidates, "not_attempted")
-        self.result["dataset"]["candidate_count"] = len(candidates)
+        self._candidate_count = len(set(str(sample_id) for sample_id in sample_ids))
+        self.result["dataset"]["candidate_count"] = self._candidate_count
 
     def update_metadata(self, **fields):
         self._ensure_running()
@@ -180,40 +174,15 @@ class MetricOutput:
     def set_selected_prototype_ids(self, prototype_ids):
         self.update_metadata(selected_prototype_ids=list(dict.fromkeys(int(value) for value in prototype_ids)))
 
-    def _require_candidate(self, sample_id):
-        if self._states is None or sample_id not in self._states:
-            raise CatalogError(f"Unknown candidate sample: {sample_id}")
-        if self._states[sample_id] != "not_attempted":
-            raise CatalogError(f"Sample has already been attempted: {sample_id}")
-
-    def start_sample(self, sample_id):
-        self._ensure_running()
-        sample_id = str(sample_id)
-        self._require_candidate(sample_id)
-        if self._active_sample is not None:
-            raise CatalogError(f"Sample {self._active_sample} is already being processed")
-        self._active_sample = sample_id
-
-    def mark_excluded(self, sample_id):
-        """Exclude a candidate before processing (for example, a missing part annotation)."""
-        self._ensure_running()
-        sample_id = str(sample_id)
-        self._require_candidate(sample_id)
-        self._states[sample_id] = "excluded"
-
     def add_observation(self, **observation):
         self._ensure_running()
         missing = [key for key in self.observation_table_columns if key not in observation]
         if missing:
             raise CatalogError(f"Observation is missing columns: {', '.join(missing)}")
         sample_id = str(observation["sample_id"])
-        if self._states is None or sample_id not in self._states:
-            raise CatalogError(f"Observation is outside the candidate population: {sample_id}")
         key = tuple(str(observation[name]) for name in OBSERVATION_KEY)
         if key in self._observation_keys:
             raise CatalogError(f"Duplicate observation key: {key}")
-        if self._active_sample != sample_id:
-            raise CatalogError(f"Observation sample is not currently being processed: {sample_id}")
         normalized = {"sample_id": sample_id}
         for name in ("class_id", "prototype_id", "repetition"):
             try:
@@ -239,14 +208,6 @@ class MetricOutput:
         self._observations.append(normalized)
         self._observation_counts[sample_id] = self._observation_counts.get(sample_id, 0) + 1
 
-    def complete_sample(self, sample_id):
-        self._ensure_running()
-        sample_id = str(sample_id)
-        if self._active_sample != sample_id:
-            raise CatalogError(f"Sample is not currently being processed: {sample_id}")
-        self._states[sample_id] = "processed"
-        self._active_sample = None
-
     def _write_observations(self):
         filename = "observations.csv"
         if filename in self._artifacts:
@@ -271,32 +232,15 @@ class MetricOutput:
         return self._artifacts[filename]
 
     def _finalize_files(self):
-        """Write the observations and population counts; return False before candidates exist."""
-        if self._states is None:
-            return False
-        if self._active_sample is not None:
-            self._states[self._active_sample] = "failed"
-            self._active_sample = None
         self.result["artifacts"] = {"observations": self._write_observations()}
-        states = list(self._states.values())
         self.result["population"] = {
-            "candidates": len(states),
+            "candidates": self._candidate_count,
             "contributing": len(self._observation_counts),
-            "excluded": states.count("excluded"),
-            "failed": states.count("failed"),
-            "not_attempted": states.count("not_attempted"),
             "observations": len(self._observations),
         }
-        return True
 
     def finish(self, value, *, numerator=None, denominator=None, reason=None):
         self._ensure_running()
-        if self._states is None:
-            raise CatalogError("Cannot complete a measurement before registering its candidate population")
-        if self._active_sample is not None:
-            raise CatalogError("Cannot complete a measurement while a sample is being processed")
-        if "not_attempted" in self._states.values():
-            raise CatalogError("A complete measurement cannot contain unattempted candidates")
         finite = value is not None and math.isfinite(float(value))
         value = float(value) if finite else None
         if not finite and not reason:

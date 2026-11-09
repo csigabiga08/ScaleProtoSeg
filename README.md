@@ -221,7 +221,7 @@ files above. Observations use stable sample/class/prototype/repetition keys; bla
 consistency part values mean unavailable, while zero means an observed miss.
 Stability stores clean and noisy part vectors rather than derived equality flags.
 A sample is contributing if it appears in `observations.csv`; `population` only
-counts candidates, contributing, excluded, failed and not-attempted samples. There
+counts candidates, contributing samples and observations. There
 is no schema or protocol version: a changed metric definition must be added behind a
 new flag. Repeated configurations are separate measurements.
 
