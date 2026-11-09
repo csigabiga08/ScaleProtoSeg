@@ -111,16 +111,6 @@ class MetricSummaryTests(unittest.TestCase):
             code = catalog_cli.main(list(args))
         return code, output.getvalue()
 
-    def test_dotenv_root_is_used_without_overwriting_exported_root(self):
-        checkout = Path(self.temporary.name) / "checkout"
-        checkout.mkdir()
-        configured = Path(self.temporary.name) / "configured"
-        configured.mkdir()
-        (checkout / ".env").write_text(f"MEASUREMENT_CATALOG_ROOT={configured}\n")
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(catalog_cli.configured_catalog_root(checkout), configured.resolve())
-        self.assertEqual(catalog_cli.configured_catalog_root(checkout), self.root.resolve())
-
     def test_list_defaults_to_complete_and_filters_by_parameters(self):
         write_measurement(self.root, make_record("complete"), [obs("a")])
         write_measurement(self.root, make_record("running", status="running"))

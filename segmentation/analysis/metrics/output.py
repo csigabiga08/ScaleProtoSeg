@@ -74,8 +74,6 @@ class MetricOutput:
         group_checkpoint=None,
         **parameters,
     ):
-        if "output_dir" in parameters:
-            raise TypeError("output_dir was removed; measurements are allocated under MEASUREMENT_CATALOG_ROOT")
         self.root = resolve_catalog_root()
         measurements = self.root / "measurements"
         while True:

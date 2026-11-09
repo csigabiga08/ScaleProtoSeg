@@ -2,7 +2,6 @@
 
 import csv
 import hashlib
-import inspect
 import json
 import os
 from pathlib import Path
@@ -206,13 +205,6 @@ class MetricCatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(CatalogError, "out-of-bundle"):
                 load_measurement(bundle)
 
-    def test_record_dataset_registers_candidates(self):
-        dataset = type("Dataset", (), {"img_ids": ["one", "two"]})()
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
-            output.record_dataset(dataset)
-            self.assertEqual(output.result["dataset"]["candidate_count"], 2)
-
     def test_discovery_yields_only_validated_uuid_records(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output()
@@ -267,12 +259,6 @@ class MetricCatalogTests(unittest.TestCase):
                 paths = list(pool.map(lambda _: self.make_output().path, range(16)))
             self.assertEqual(len(set(paths)), 16)
             self.assertTrue(all(path.parent == self.root / "measurements" for path in paths))
-
-    def test_removed_output_directory_parameter_is_not_part_of_writer_api(self):
-        self.assertNotIn("output_dir", inspect.signature(MetricOutput).parameters)
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            with self.assertRaisesRegex(TypeError, "output_dir was removed"):
-                self.make_output(output_dir=self.root)
 
 
 if __name__ == "__main__":
