@@ -60,14 +60,14 @@ class ConsistencyRunInput(MetricRunInput):
         evaluation_class_id_to_label: Mapping[str, str],
         valid_part_ids: Sequence[int],
         observation_columns: Sequence[str],
-        excluded_evaluation_class_ids: Optional[Sequence[int]] = None,
+        excluded_evaluation_class_ids: Sequence[int],
     ) -> Dict[str, object]:
         classes = self._protocol_classes(
             semantic_id_to_evaluation_id,
             evaluation_class_id_to_label,
         )
         classes["excluded_evaluation_class_ids"] = list(
-            excluded_evaluation_class_ids or ()
+            excluded_evaluation_class_ids
         )
         return {
             "metric": "consistency",

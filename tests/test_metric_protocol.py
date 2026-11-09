@@ -26,17 +26,44 @@ class MetricRunInputTests(unittest.TestCase):
             evaluation_class_id_to_label={"2": "cat"},
             valid_part_ids=[9, 3],
             observation_columns=["part_0", "part_3"],
-            excluded_evaluation_class_ids=[1],
+            excluded_evaluation_class_ids=[1, 5, 10, 12, 19],
         )
-        self.assertEqual(protocol["metric"], "consistency")
-        self.assertEqual(protocol["quantile"], 0.8)
-        self.assertEqual(protocol["parts"]["valid_part_ids"], [9, 3])
-        self.assertEqual(protocol["classes"]["background_evaluation_class_id"], 1)
-        self.assertEqual(protocol["classes"]["excluded_evaluation_class_ids"], [1])
-        self.assertEqual(protocol["consistency"], {
-            "threshold": 0.8,
-            "aggregation": "unweighted mean over class/prototype rows",
+        self.assertEqual(protocol, {
+            "metric": "consistency",
+            "quantile": 0.8,
+            "parts": {
+                "valid_part_ids": [9, 3],
+                "official_parts_only": False,
+                "require_semantic_match": False,
+                "exclude_background_centroid": False,
+            },
+            "classes": {
+                "semantic_id_to_evaluation_id": {1: 2},
+                "evaluation_class_id_to_label": {"2": "cat"},
+                "background_evaluation_class_id": 1,
+                "excluded_evaluation_class_ids": [1, 5, 10, 12, 19],
+            },
+            "consistency": {
+                "threshold": 0.8,
+                "aggregation": "unweighted mean over class/prototype rows",
+            },
+            "observation_columns": ["part_0", "part_3"],
         })
+
+    def test_consistency_requires_explicit_excluded_class_ids(self):
+        run = ConsistencyRunInput(
+            model_name="model",
+            training_phase="push",
+            data_type="pascal",
+        )
+
+        with self.assertRaises(TypeError):
+            run.to_protocol(
+                semantic_id_to_evaluation_id={1: 2},
+                evaluation_class_id_to_label={"2": "cat"},
+                valid_part_ids=[9, 3],
+                observation_columns=["part_0", "part_3"],
+            )
 
     def test_stability_defaults_and_protocol_settings(self):
         run = StabilityRunInput(
@@ -121,9 +148,11 @@ class MetricRunInputTests(unittest.TestCase):
             evaluation_class_id_to_label={"2": "car"},
             valid_part_ids=[4, 1],
             observation_columns=["part_1"],
+            excluded_evaluation_class_ids=[],
         )
 
         self.assertEqual(protocol["parts"]["valid_part_ids"], [4, 1])
+        self.assertEqual(protocol["classes"]["excluded_evaluation_class_ids"], [])
         serialized = repr(protocol)
         for operational_value in (
             "private-model-name",
