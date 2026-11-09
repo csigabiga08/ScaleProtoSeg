@@ -1,5 +1,7 @@
 """Typed run inputs and serializers for metric protocols."""
 
+import os
+from pathlib import Path
 from typing import Dict, Literal, Mapping, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -28,6 +30,35 @@ class MetricRunInput(BaseModel):
         if self.merge_left_right_parts and self.data_type != "pascal":
             raise ValueError("merge_left_right_parts is supported only for pascal")
         return self
+
+    def _checkpoint_override(self) -> Optional[str]:
+        return None
+
+    @property
+    def resolved_checkpoint_path(self) -> str:
+        override = self._checkpoint_override()
+        if override is not None:
+            return os.fspath(Path(override).expanduser())
+
+        model_path = Path(os.environ["RESULTS_DIR"]) / self.model_name
+        if self.training_phase == "pruned":
+            path = model_path / "pruned/checkpoints/push_last.pth"
+        else:
+            path = model_path / f"checkpoints/{self.training_phase}_last.pth"
+        return os.fspath(path)
+
+    @property
+    def resolved_group_checkpoint_path(self) -> Optional[str]:
+        if self.group_checkpoint is not None:
+            return os.fspath(Path(self.group_checkpoint).expanduser())
+        if self.group_name is None:
+            return None
+        path = (
+            Path(os.environ["RESULTS_DIR"])
+            / self.group_name
+            / "checkpoints/th-0.05-nopush-group_last.pth"
+        )
+        return os.fspath(path)
 
     def _protocol_parts(
         self,
@@ -66,6 +97,9 @@ class ConsistencyRunInput(MetricRunInput):
     checkpoint: Optional[str] = None
     threshold: float = 0.8
 
+    def _checkpoint_override(self) -> Optional[str]:
+        return self.checkpoint
+
     def to_protocol(
         self,
         *,
@@ -100,6 +134,9 @@ class StabilityRunInput(MetricRunInput):
     checkpoint_path: Optional[str] = None
     std_dev: float = 0.2
     seed: int = 0
+
+    def _checkpoint_override(self) -> Optional[str]:
+        return self.checkpoint_path
 
     def to_protocol(
         self,

@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 from find_nearest import to_normalized_tensor
 from segmentation.analysis.equivariance import quantile_map
+from segmentation.analysis.metrics.helpers import proto_filter, selected_prototypes
 from segmentation.analysis.metrics.output import MetricOutput
 from segmentation.analysis.metrics.protocol import StabilityRunInput
 from segmentation.checkpoints import load_model_checkpoint
@@ -33,33 +34,6 @@ from segmentation.data.pascal_parts import left_right_part_groups, merge_left_ri
 from segmentation.model.model import PPNet
 from segmentation.model.model_multiscale_group import PPNetMultiScale
 from settings import log
-
-
-def proto_filter(ppnet: PPNetMultiScale) -> List[int]:
-    """Callable to filter prototypes when not used in grouping mechanism."""
-    tot_list_proto_ids = []
-    for class_id in range(len(ppnet.group_projection)):
-        proto_ids = torch.nonzero(ppnet.group_projection[class_id].weight.data.sum(dim=0))
-        proto_ids = proto_ids.flatten().tolist()
-        class_proto_ids = ppnet.prototype_class_identity[:, class_id].flatten().nonzero()
-        class_proto_ids = class_proto_ids.flatten().tolist()
-        filter_class_proto_ids = [class_proto_ids[proto_id] for proto_id in proto_ids]
-        tot_list_proto_ids.extend(filter_class_proto_ids)
-    return tot_list_proto_ids
-
-
-def _selected_prototypes(model, allowed_ids):
-    identity = getattr(model, "prototype_class_identity", None)
-    if not isinstance(identity, torch.Tensor) or identity.ndim != 2:
-        return []
-    identity = identity.detach().cpu().numpy()
-    allowed = None if allowed_ids is None else set(int(value) for value in allowed_ids)
-    return [
-        int(proto_id)
-        for class_index in range(identity.shape[1])
-        for proto_id in np.flatnonzero(identity[:, class_index])
-        if allowed is None or int(proto_id) in allowed
-    ]
 
 
 def _paired_rows(part_rows, noisy_rows, max_parts):
@@ -112,31 +86,12 @@ def run_stability(run_input: StabilityRunInput):
     data_type = run_input.data_type
     quantile = run_input.quantile
     std_dev = run_input.std_dev
-    group_name = run_input.group_name
-    checkpoint_path = run_input.checkpoint_path
-    group_checkpoint = run_input.group_checkpoint
+    checkpoint_path = run_input.resolved_checkpoint_path
     official_parts_only = run_input.official_parts_only
     require_semantic_match = run_input.require_semantic_match
     seed = run_input.seed
     exclude_background_centroid = run_input.exclude_background_centroid
     merge_left_right_parts = run_input.merge_left_right_parts
-
-    if official_parts_only and data_type != "cityscapes":
-        raise ValueError("official_parts_only is supported only for cityscapes")
-    if require_semantic_match and data_type != "pascal":
-        raise ValueError("require_semantic_match is supported only for pascal")
-    if merge_left_right_parts and data_type != "pascal":
-        raise ValueError("merge_left_right_parts is supported only for pascal")
-
-    model_path = os.path.join(os.environ["RESULTS_DIR"], model_name)
-
-    if checkpoint_path is not None:
-        checkpoint_path = os.path.expanduser(checkpoint_path)
-    elif training_phase == "pruned":
-        checkpoint_path = os.path.join(model_path, "pruned/checkpoints/push_last.pth")
-        # checkpoint_path = os.path.join(model_path, 'pruned/pruned.pth')
-    else:
-        checkpoint_path = os.path.join(model_path, f"checkpoints/{training_phase}_last.pth")
 
     global MAX_PARTS
 
@@ -158,13 +113,7 @@ def run_stability(run_input: StabilityRunInput):
     else:
         raise NotImplementedError(f"Data type {data_type} not supported")
 
-    checkpoint_path_group = None
-    if group_checkpoint is not None or group_name is not None:
-        if group_checkpoint is not None:
-            checkpoint_path_group = os.path.expanduser(group_checkpoint)
-        else:
-            group_path = os.path.join(os.environ["RESULTS_DIR"], group_name)
-            checkpoint_path_group = os.path.join(group_path, "checkpoints/th-0.05-nopush-group_last.pth")
+    checkpoint_path_group = run_input.resolved_group_checkpoint_path
 
     protocol = run_input.to_protocol(
         semantic_id_to_evaluation_id=ID_MAPPING,
@@ -212,7 +161,7 @@ def run_stability(run_input: StabilityRunInput):
                 output.register_input("group_checkpoint", checkpoint_path)
         else:
             proto_ids = None
-        output.set_selected_prototype_ids(_selected_prototypes(ppnet, proto_ids))
+        output.set_selected_prototype_ids(selected_prototypes(ppnet, proto_ids))
         output.update_model_metadata(architecture=type(ppnet).__name__)
 
         val_dataset = PatchClassificationDataset(  # TODO: Adapt to new dataset

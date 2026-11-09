@@ -1,4 +1,6 @@
+import os
 import unittest
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
@@ -10,6 +12,59 @@ from segmentation.data.pascal_parts import left_right_part_groups
 
 
 class MetricRunInputTests(unittest.TestCase):
+    def test_checkpoint_resolution_uses_override_or_results_dir_defaults(self):
+        with patch.dict(os.environ, {"RESULTS_DIR": "/results", "HOME": "/home/test"}):
+            consistency = ConsistencyRunInput(
+                model_name="model",
+                training_phase="push",
+                data_type="pascal",
+            )
+            stability = StabilityRunInput(
+                model_name="model",
+                training_phase="pruned",
+                data_type="pascal",
+            )
+            explicit_consistency = consistency.model_copy(update={"checkpoint": "~/custom.pth"})
+            explicit_stability = stability.model_copy(update={"checkpoint_path": "~/custom.pth"})
+
+            self.assertEqual(
+                consistency.resolved_checkpoint_path,
+                "/results/model/checkpoints/push_last.pth",
+            )
+            self.assertEqual(
+                stability.resolved_checkpoint_path,
+                "/results/model/pruned/checkpoints/push_last.pth",
+            )
+            self.assertEqual(
+                explicit_consistency.resolved_checkpoint_path,
+                "/home/test/custom.pth",
+            )
+            self.assertEqual(
+                explicit_stability.resolved_checkpoint_path,
+                "/home/test/custom.pth",
+            )
+
+            consistency_group = ConsistencyRunInput(
+                model_name="model",
+                training_phase="push",
+                data_type="pascal",
+                group_name="group",
+            )
+            explicit_group = StabilityRunInput(
+                model_name="model",
+                training_phase="push",
+                data_type="pascal",
+                group_checkpoint="~/custom-group.pth",
+            )
+            self.assertEqual(
+                consistency_group.resolved_group_checkpoint_path,
+                "/results/group/checkpoints/th-0.05-nopush-group_last.pth",
+            )
+            self.assertEqual(
+                explicit_group.resolved_group_checkpoint_path,
+                "/home/test/custom-group.pth",
+            )
+
     def test_consistency_defaults_and_protocol_settings(self):
         run = ConsistencyRunInput(
             model_name="model",
