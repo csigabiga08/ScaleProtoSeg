@@ -8,9 +8,14 @@ import sys
 
 from segmentation.analysis.metrics.catalog import (
     CatalogError,
+    create_fresh_output_dir,
+    ensure_external_output,
     load_measurement,
+    load_observations,
+    read_result,
     resolve_catalog_root,
     validate_result,
+    write_derived_csv,
 )
 from segmentation.analysis.metrics.summaries import SummaryError, summarize_observations
 from segmentation.analysis.metrics.visualizations import render_measurements
@@ -21,18 +26,8 @@ def configured_catalog_root(checkout=None):
     return resolve_catalog_root(checkout=checkout)
 
 
-def _read_metadata(path):
-    def reject_constant(value):
-        raise ValueError(f"Non-finite JSON number: {value}")
-
-    try:
-        return json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_constant)
-    except (OSError, UnicodeDecodeError, ValueError) as error:
-        raise CatalogError(f"Cannot read measurement metadata {path}: {error}") from error
-
-
 def _load_record(bundle):
-    return validate_result(_read_metadata(bundle / "result.json"))
+    return validate_result(read_result(bundle / "result.json"))
 
 
 def _get_path(value, path):
@@ -139,7 +134,7 @@ def find_measurement(root, measurement_id):
     if not bundle.is_dir():
         matches = [
             path for path in (root / "measurements").iterdir()
-            if path.is_dir() and _read_metadata(path / "result.json").get("measurement_id") == measurement_id
+            if path.is_dir() and read_result(path / "result.json").get("measurement_id") == measurement_id
         ] if (root / "measurements").is_dir() else []
         if len(matches) != 1:
             raise CatalogError(f"Measurement ID not found or ambiguous: {measurement_id}")
@@ -161,35 +156,6 @@ def _flatten(value, prefix=""):
     return flattened
 
 
-def ensure_external_output(path, root=None):
-    """Reject any derived output inside canonical measurement storage."""
-    requested = Path(path).expanduser()
-    if requested.is_symlink():
-        raise CatalogError(f"Derived export destination cannot be a symlink: {requested}")
-    target = requested.resolve()
-    root = Path(root) if root is not None else configured_catalog_root()
-    canonical = (root / "measurements").resolve()
-    if target == canonical or canonical in target.parents:
-        raise CatalogError(f"Derived exports must be outside catalog measurements: {target}")
-    return target
-
-
-def _create_fresh_output_dir(path, root=None):
-    output_dir = ensure_external_output(path, root)
-    if output_dir.exists() or output_dir.is_symlink():
-        raise CatalogError(
-            f"Derived output directory must not already exist; choose a fresh path: {output_dir}"
-        )
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        output_dir.mkdir()
-    except FileExistsError as error:
-        raise CatalogError(
-            f"Derived output directory must not already exist; choose a fresh path: {output_dir}"
-        ) from error
-    return output_dir
-
-
 def export_records(records, output, root=None):
     output = ensure_external_output(output, root)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -208,34 +174,10 @@ def export_records(records, output, root=None):
     return output
 
 
-def _artifact_path(bundle, result, role):
-    artifact = result.get("artifacts", {}).get(role)
-    if not isinstance(artifact, dict) or not artifact.get("path"):
-        raise CatalogError(f"Measurement has no {role} artifact")
-    relative = Path(artifact["path"])
-    if relative.is_absolute() or ".." in relative.parts:
-        raise CatalogError(f"Artifact path must be relative to its measurement: {role}")
-    path = (bundle / relative).resolve()
-    if bundle.resolve() not in path.parents:
-        raise CatalogError(f"Artifact path escapes measurement: {role}")
-    if not path.is_file():
-        raise CatalogError(f"Missing measurement artifact: {path}")
-    return path
-
-
 def read_observations(bundle, result):
     """Read observation rows only for explicit aggregation/plot operations."""
-    bundle = Path(bundle)
-    result = load_measurement(bundle)
-    path = _artifact_path(bundle, result, "observations")
-    try:
-        with path.open(newline="", encoding="utf-8") as stream:
-            reader = csv.DictReader(stream)
-            if not reader.fieldnames:
-                raise CatalogError(f"Observation table has no header: {path}")
-            return list(reader)
-    except (OSError, UnicodeDecodeError, csv.Error) as error:
-        raise CatalogError(f"Cannot read observations from {path}: {error}") from error
+    _fresh_result, rows = load_observations(bundle)
+    return rows
 
 
 def validate_measurement(bundle):
@@ -277,7 +219,7 @@ def validate_measurement(bundle):
 
 
 def export_summary(result, summary, output_dir, root=None):
-    output_dir = _create_fresh_output_dir(output_dir, root)
+    output_dir = create_fresh_output_dir(output_dir, root)
     with (output_dir / "summary.json").open("x", encoding="utf-8") as stream:
         stream.write(json.dumps(summary, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
     tables = {
@@ -291,14 +233,7 @@ def export_summary(result, summary, output_dir, root=None):
         if not rows:
             continue
         columns = list(rows[0])
-        with (output_dir / name).open("x", newline="", encoding="utf-8") as stream:
-            writer = csv.DictWriter(stream, fieldnames=columns)
-            writer.writeheader()
-            for row in rows:
-                writer.writerow({
-                    key: json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else value
-                    for key, value in row.items()
-                })
+        write_derived_csv(output_dir / name, rows, columns)
     return output_dir
 
 
@@ -389,16 +324,14 @@ def main(argv=None):
             print(json.dumps(diagnostics, indent=2, ensure_ascii=False))
             return 0 if all(item["status"] == "valid" for item in diagnostics) else 1
         if args.command == "summarize":
-            bundle, result = find_measurement(root, args.measurement_id)
+            bundle, _discovered_result = find_measurement(root, args.measurement_id)
+            result, rows = load_observations(bundle)
             status = result.get("status")
-            if status == "running":
-                raise CatalogError("Running measurements cannot be summarized")
             if status == "failed" and not args.all_status:
                 raise CatalogError(
                     "Summaries default to complete measurements; pass --all-status "
                     "to inspect a failed record"
                 )
-            rows = read_observations(bundle, result)
             summary = summarize_observations(result, rows)
             if args.output_dir:
                 print(export_summary(result, summary, args.output_dir, root))
@@ -406,15 +339,19 @@ def main(argv=None):
                 print(json.dumps(summary, indent=2, ensure_ascii=False, allow_nan=False))
             return 0
         if args.command == "plot":
-            bundles = _record_id_map(root, args.measurement_ids)
-            if any(record.get("metric") != "consistency" for _, record in bundles):
+            discovered = _record_id_map(root, args.measurement_ids)
+            bundles = []
+            for bundle, _record in discovered:
+                result, rows = load_observations(bundle)
+                bundles.append((bundle, result, rows))
+            if any(record.get("metric") != "consistency" for _, record, _rows in bundles):
                 raise SummaryError("The visualization command accepts consistency measurements only")
             summaries = [
-                summarize_observations(record, read_observations(bundle, record))
-                for bundle, record in bundles
+                summarize_observations(record, rows)
+                for _bundle, record, rows in bundles
             ]
             rendered = render_measurements(
-                [record for _, record in bundles], summaries, args.output_dir, root=root
+                [record for _, record, _rows in bundles], summaries, args.output_dir, root=root
             )
             print(json.dumps({
                 "output_dir": str(rendered["output_dir"]),

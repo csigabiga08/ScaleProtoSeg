@@ -13,7 +13,8 @@ from unittest.mock import patch
 import warnings
 
 from segmentation.analysis.metrics import catalog_cli, summaries, visualizations
-from segmentation.analysis.metrics.catalog import CatalogError, load_measurement
+from segmentation.analysis.metrics.catalog import CatalogError, load_measurement, write_derived_csv
+from segmentation.analysis.metrics.output import MetricOutput
 
 
 CONSISTENCY_PROTOCOL = {
@@ -143,6 +144,36 @@ class MetricSummaryTests(unittest.TestCase):
         self.root = Path(self.temporary.name) / "catalog"
         (self.root / "measurements").mkdir(parents=True)
 
+    def make_native_measurement(self):
+        checkpoint = Path(self.temporary.name) / "native-checkpoint.pth"
+        checkpoint.write_bytes(b"fixture")
+        protocol = json.loads(json.dumps(CONSISTENCY_PROTOCOL))
+        protocol["parts"]["maximum_part_id"] = 2
+        protocol["parts"]["mapping_identity"].update({
+            "path": str(checkpoint),
+            "bytes": checkpoint.stat().st_size,
+        })
+        protocol["parts"]["annotation_provenance"] = "unknown"
+        protocol["classes"]["id_convention"] = {
+            "semantic_mapping_input_ids": "source IDs",
+            "semantic_mapping_output_ids": "one-based evaluator IDs",
+            "model_class_index": "evaluation_class_id - 1",
+        }
+        protocol["consistency"]["prototype_class_consistent"] = "any part flag is one"
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = MetricOutput(
+                "consistency",
+                checkpoint,
+                "fixture",
+                model_name="fixture",
+                training_phase="push",
+                protocol=protocol,
+            )
+        output.set_candidates(["excluded"])
+        output.mark_sample("excluded", "excluded", "fixture")
+        output.finish(value=0.0, numerator=0, denominator=1)
+        return output.path, output.measurement_id
+
     def test_dotenv_root_is_used_without_overwriting_exported_root(self):
         checkout = Path(self.temporary.name) / "checkout"
         checkout.mkdir()
@@ -251,6 +282,154 @@ class MetricSummaryTests(unittest.TestCase):
         self.assertTrue((summary_output / "summary.json").is_file())
         summary = json.loads((summary_output / "summary.json").read_text())
         self.assertEqual(summary["score"]["value"], 1.0)
+
+    def test_summarize_parses_each_legacy_csv_artifact_once(self):
+        record = legacy_record("single-parse")
+        rows = [{
+            "sample_id": "sample",
+            "class_id": "1",
+            "prototype_id": "1",
+            "repetition": "0",
+            "part_1": "1",
+            "part_2": "0",
+        }]
+        write_measurement(self.root, record, rows)
+        parsed_paths = []
+        original_reader = csv.DictReader
+
+        def count_csv_reader(stream, *args, **kwargs):
+            parsed_paths.append(Path(stream.name).name)
+            return original_reader(stream, *args, **kwargs)
+
+        with (
+            patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}),
+            patch(
+                "segmentation.analysis.metrics.catalog.csv.DictReader",
+                side_effect=count_csv_reader,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(catalog_cli.main(["summarize", "single-parse"]), 0)
+        self.assertEqual(parsed_paths.count("observations.csv"), 1)
+
+    def test_load_observations_distinguishes_empty_table_from_absent_evidence(self):
+        from segmentation.analysis.metrics.catalog import load_observations
+
+        record = legacy_record("empty-observations")
+        bundle = write_measurement(self.root, record)
+        path = bundle / "observations.csv"
+        columns = ["sample_id", "class_id", "prototype_id", "repetition", "part_1", "part_2"]
+        with path.open("w", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerow(columns)
+        record["artifacts"]["observations"] = {"path": "observations.csv", "columns": columns}
+        record["observation_schema"] = {"version": 1, "columns": columns}
+        (bundle / "result.json").write_text(json.dumps(record), encoding="utf-8")
+
+        fresh_result, rows = load_observations(bundle)
+        self.assertEqual(fresh_result["measurement_id"], "empty-observations")
+        self.assertEqual(rows, [])
+
+        absent_bundle = write_measurement(self.root, legacy_record("no-observations"))
+        with self.assertRaisesRegex(CatalogError, "finalized observation evidence"):
+            load_observations(absent_bundle)
+
+    def test_summary_and_plot_parse_each_native_and_legacy_artifact_once(self):
+        legacy_rows = [{
+            "sample_id": "sample",
+            "class_id": "1",
+            "prototype_id": "1",
+            "repetition": "0",
+            "part_1": "1",
+            "part_2": "0",
+        }]
+        records = []
+        for origin, operation in (
+            ("legacy", "summarize"),
+            ("legacy", "plot"),
+            ("native", "summarize"),
+            ("native", "plot"),
+        ):
+            if origin == "legacy":
+                measurement_id = f"{origin}-{operation}"
+                bundle = write_measurement(self.root, legacy_record(measurement_id), legacy_rows)
+            else:
+                bundle, measurement_id = self.make_native_measurement()
+            records.append((origin, operation, bundle, measurement_id))
+
+        original_reader = csv.DictReader
+        for origin, operation, bundle, measurement_id in records:
+            parsed_paths = []
+
+            def count_csv_reader(stream, *args, **kwargs):
+                parsed_paths.append(Path(stream.name).name)
+                return original_reader(stream, *args, **kwargs)
+
+            args = [operation, measurement_id]
+            if operation == "plot":
+                args.extend(["--output-dir", str(Path(self.temporary.name) / f"plots-{measurement_id}")])
+            with (
+                patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}),
+                patch(
+                    "segmentation.analysis.metrics.catalog.csv.DictReader",
+                    side_effect=count_csv_reader,
+                ),
+                patch(
+                    "segmentation.analysis.metrics.catalog_cli.render_measurements",
+                    return_value={
+                        "output_dir": Path(self.temporary.name) / "mock-plots",
+                        "support_comparable": True,
+                    },
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                if operation == "plot":
+                    args = ["plot", measurement_id, "--output-dir", str(Path(self.temporary.name) / f"plots-{measurement_id}")]
+                self.assertEqual(catalog_cli.main(args), 0)
+            expected = ["observations.csv"] if origin == "legacy" else ["observations.csv", "samples.csv"]
+            self.assertCountEqual(parsed_paths, expected)
+
+    def test_summarize_uses_fresh_status_instead_of_discovered_metadata(self):
+        rows = [{
+            "sample_id": "sample",
+            "class_id": "1",
+            "prototype_id": "1",
+            "repetition": "0",
+            "part_1": "1",
+            "part_2": "0",
+        }]
+        bundle = write_measurement(self.root, legacy_record("fresh-status"), rows)
+        stale = legacy_record("fresh-status", status="failed")
+        with (
+            patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}),
+            patch("segmentation.analysis.metrics.catalog_cli.find_measurement", return_value=(bundle, stale)),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(catalog_cli.main(["summarize", "fresh-status"]), 0)
+
+    def test_load_observations_rejects_malformed_and_returns_failed_partial_rows(self):
+        from segmentation.analysis.metrics.catalog import load_observations
+
+        rows = [{
+            "sample_id": "sample",
+            "class_id": "1",
+            "prototype_id": "1",
+            "repetition": "0",
+            "part_1": "1",
+            "part_2": "0",
+        }]
+        failed_bundle = write_measurement(
+            self.root, legacy_record("failed-partial", status="failed"), rows
+        )
+        result, loaded_rows = load_observations(failed_bundle)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(loaded_rows, rows)
+
+        malformed = legacy_record("malformed-observations")
+        malformed_bundle = write_measurement(self.root, malformed, rows)
+        path = malformed_bundle / "observations.csv"
+        path.write_text("sample_id,class_id,prototype_id,repetition,part_1,part_2\ns,x,1,0,1,0\n")
+        with self.assertRaisesRegex(CatalogError, "Invalid class_id"):
+            load_observations(malformed_bundle)
 
     def test_summarize_all_status_allows_finalized_failures_but_never_running(self):
         failed = legacy_record("failed-summary", status="failed")
@@ -444,6 +623,95 @@ class MetricSummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(CatalogError, "outside catalog measurements"):
             catalog_cli.ensure_external_output(bundle / "result.json", self.root)
 
+    def test_derived_csv_writer_preserves_headers_unicode_nulls_and_nested_values(self):
+        destination = Path(self.temporary.name) / "derived.csv"
+        write_derived_csv(
+            destination,
+            [{"label": "café", "empty": None, "metadata": {"雪": ["é", 2]}}],
+            ["label", "empty", "metadata"],
+        )
+        with destination.open(newline="", encoding="utf-8") as stream:
+            reader = csv.DictReader(stream)
+            self.assertEqual(reader.fieldnames, ["label", "empty", "metadata"])
+            row = next(reader)
+        self.assertEqual(row, {
+            "label": "café",
+            "empty": "",
+            "metadata": '{"雪": ["é", 2]}',
+        })
+
+        empty_destination = Path(self.temporary.name) / "empty-derived.csv"
+        write_derived_csv(empty_destination, [], ["first", "second"])
+        self.assertEqual(empty_destination.read_text(encoding="utf-8"), "first,second\n")
+
+    def test_summary_export_omits_empty_tables_and_preserves_column_order(self):
+        destination = Path(self.temporary.name) / "summary-tables"
+        summary = {
+            "score": {"value": 1.0},
+            "classes": [{"label": "café", "value": 1.0, "metadata": {"雪": [1]}}],
+            "parts": [],
+            "prototypes": [],
+            "support": [],
+            "stability_rows": [],
+        }
+        catalog_cli.export_summary(
+            legacy_record("summary-columns"), summary, destination, root=self.root
+        )
+        self.assertEqual(
+            {path.name for path in destination.iterdir()},
+            {"summary.json", "classes.csv"},
+        )
+        with (destination / "classes.csv").open(newline="", encoding="utf-8") as stream:
+            reader = csv.DictReader(stream)
+            self.assertEqual(reader.fieldnames, ["label", "value", "metadata"])
+            row = next(reader)
+        self.assertEqual(row["label"], "café")
+        self.assertEqual(row["metadata"], '{"雪": [1]}')
+
+    def test_visualization_exports_empty_tables_with_explicit_headers(self):
+        destination = Path(self.temporary.name) / "empty-plots"
+        record = legacy_record("empty-visualization")
+        summary = {
+            "quantile": 0.8,
+            "score": {"value": None},
+            "threshold": 0.8,
+            "classes": [],
+            "prototypes": [],
+            "parts": [],
+            "support": [],
+        }
+        with (
+            warnings.catch_warnings(),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            warnings.simplefilter("ignore", DeprecationWarning)
+            warnings.simplefilter("ignore", UserWarning)
+            visualizations.render_measurements(
+                [record], [summary], destination, root=self.root
+            )
+        expected_headers = {
+            "01_heatmap_values.csv": [
+                "measurement_id", "quantile", "class_id", "class_name", "prototype_id",
+                "part_id", "part_name", "mean_presence", "available_observations",
+                "above_threshold",
+            ],
+            "02_class_consistency.csv": [
+                "measurement_id", "quantile", "class_id", "class_name", "numerator",
+                "denominator", "consistency_fraction",
+            ],
+            "03_prototype_scores.csv": [
+                "measurement_id", "quantile", "class_id", "class_name", "prototype_id",
+                "max_part_frequency", "consistent",
+            ],
+            "04_usable_images.csv": [
+                "measurement_id", "quantile", "class_id", "class_name", "part_id",
+                "usable_images", "part_name", "prototype_support_matches", "support_view",
+            ],
+        }
+        for filename, columns in expected_headers.items():
+            with (destination / filename).open(newline="", encoding="utf-8") as stream:
+                self.assertEqual(next(csv.reader(stream)), columns)
+
     def test_summary_export_rejects_existing_symlink_without_touching_target(self):
         destination = Path(self.temporary.name) / "summary-output"
         destination.mkdir()
@@ -606,6 +874,7 @@ class MetricSummaryTests(unittest.TestCase):
         unknown_fields = (
             ("input.normalization.mean", None),
             ("model.epsilon", None),
+            ("activation.quantile_interpolation", " unknown "),
         )
         for field_path, unknown_value in unknown_fields:
             with self.subTest(field=field_path):

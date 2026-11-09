@@ -2,19 +2,14 @@
 
 import csv
 from datetime import datetime, timezone
-import hashlib
-import importlib.metadata
 import json
 import math
 import os
 from pathlib import Path
 import platform
-import re
 import socket
-import subprocess
 import sys
 import uuid
-import yaml
 
 from segmentation.analysis.metrics.catalog import (
     CatalogError,
@@ -24,25 +19,14 @@ from segmentation.analysis.metrics.catalog import (
     resolve_catalog_root,
     sha256_file,
 )
-
-
-_PACKAGES = (
-    "torch", "torchvision", "numpy", "pandas", "Pillow", "opencv-python",
-    "scikit-image", "scipy", "tqdm",
+from segmentation.analysis.metrics.provenance import (
+    dataset_provenance,
+    file_identity,
+    package_versions,
+    sanitize_error,
+    source_provenance,
 )
-_SENSITIVE_ASSIGNMENT = re.compile(
-    r"(?i)\b[\w.-]*(?:password|passwd|secret|token|api[_-]?key|credential|private[_-]?key)\b\s*[:=]"
-)
-_SENSITIVE_VALUE = re.compile(
-    r"(?i)(\b[\w.-]*(?:password|passwd|secret|token|api[_-]?key|credential|private[_-]?key)\b\s*[:=]\s*)"
-    r'(?:"[^"]*"|\'[^\']*\'|[^\s,;]+)'
-)
-
-
-def _sanitize_error(error):
-    message = f"{type(error).__name__}: {error}"
-    message = _SENSITIVE_VALUE.sub(r"\1[redacted]", message)
-    return "".join(character for character in message if character.isprintable())[:500]
+from segmentation.analysis.metrics.population import ordered_ids_sha256, population_counts
 
 
 def _now():
@@ -68,105 +52,6 @@ def _json_value(value):
             except (TypeError, ValueError, RuntimeError):
                 return str(value)
     return str(value)
-
-
-def _run_git(checkout, *arguments):
-    try:
-        return subprocess.run(
-            ["git", "-C", str(checkout), *arguments],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return None
-
-
-def _source_provenance(checkout):
-    if _run_git(checkout, "rev-parse", "--show-toplevel") is None:
-        return {
-            "commit": None,
-            "tracked_diff": None,
-            "relevant_untracked_source": [],
-            "submodules": [],
-            "missing": ["git source identity"],
-        }
-    diff = _run_git(checkout, "diff", "--binary", "HEAD")
-    untracked = _run_git(checkout, "ls-files", "--others", "--exclude-standard") or ""
-    source_files = []
-    omitted_source = []
-    for relative in untracked.splitlines():
-        path = Path(relative)
-        if path.suffix not in (".py", ".sh") or path.parts[0] not in ("segmentation", "scripts"):
-            continue
-        source = checkout / path
-        if source.is_symlink():
-            omitted_source.append(str(path))
-            continue
-        try:
-            source.resolve().relative_to(checkout.resolve())
-            contents = source.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError, ValueError):
-            omitted_source.append(str(path))
-            continue
-        if _SENSITIVE_ASSIGNMENT.search(contents):
-            omitted_source.append(str(path))
-            continue
-        source_files.append({
-            "path": str(path),
-            "sha256": hashlib.sha256(contents.encode()).hexdigest(),
-            "content": contents,
-        })
-    submodules = _run_git(checkout, "submodule", "status") or ""
-    tracked_diff = None
-    if diff:
-        tracked_diff = {
-            "sha256": hashlib.sha256(diff.encode()).hexdigest(),
-            "content": None if _SENSITIVE_ASSIGNMENT.search(diff) else diff,
-        }
-        if tracked_diff["content"] is None:
-            tracked_diff["content_omitted_for_sensitive_content"] = True
-    return {
-        "commit": _run_git(checkout, "rev-parse", "HEAD"),
-        "tracked_diff": tracked_diff,
-        "relevant_untracked_source": source_files,
-        "sensitive_looking_untracked_source_omitted": omitted_source,
-        "submodules": [line.strip() for line in submodules.splitlines() if line.strip()],
-        "missing": [],
-    }
-
-
-def _file_identity(path, cache):
-    absolute = str(Path(path).expanduser().resolve())
-    if absolute not in cache:
-        source = Path(absolute)
-        if source.is_file():
-            try:
-                digest, size = sha256_file(source)
-                cache[absolute] = {
-                    "path": absolute,
-                    "bytes": size,
-                    "sha256": digest,
-                    "status": "available",
-                }
-            except OSError as error:
-                cache[absolute] = {
-                    "path": absolute,
-                    "bytes": None,
-                    "sha256": None,
-                    "status": "unreadable",
-                    "error": str(error)[:200],
-                }
-        else:
-            cache[absolute] = {
-                "path": absolute,
-                "bytes": None,
-                "sha256": None,
-                "status": "missing",
-                "reason": "Input file does not exist at measurement initialization.",
-            }
-    return dict(cache[absolute])
 
 
 class MetricOutput:
@@ -216,10 +101,10 @@ class MetricOutput:
         self._artifact_cache = {}
         checkout = Path(__file__).resolve().parents[3]
         inputs = {
-            "prototype_checkpoint": _file_identity(checkpoint, self._input_hash_cache),
+            "prototype_checkpoint": file_identity(checkpoint, self._input_hash_cache),
         }
         if group_checkpoint is not None:
-            inputs["group_checkpoint"] = _file_identity(group_checkpoint, self._input_hash_cache)
+            inputs["group_checkpoint"] = file_identity(group_checkpoint, self._input_hash_cache)
         self.result = {
             "schema_version": SCHEMA_VERSION,
             "measurement_id": self.measurement_id,
@@ -245,11 +130,11 @@ class MetricOutput:
             "protocol": _json_value(protocol),
             "parameters": _json_value(parameters),
             "execution": {
-                **_source_provenance(checkout),
+                **source_provenance(checkout),
                 "command": list(sys.argv),
                 "python": platform.python_version(),
                 "python_executable": sys.executable,
-                "packages": self._package_versions(),
+                "packages": package_versions(),
                 "host": socket.gethostname(),
                 "scheduler_job_id": os.environ.get("SLURM_JOB_ID"),
             },
@@ -285,16 +170,6 @@ class MetricOutput:
                 self.result["provenance_quality"]["missing_fields"].append(f"{role} SHA-256")
         self._write_result()
 
-    @staticmethod
-    def _package_versions():
-        versions = {}
-        for package in _PACKAGES:
-            try:
-                versions[package] = importlib.metadata.version(package)
-            except importlib.metadata.PackageNotFoundError:
-                versions[package] = None
-        return versions
-
     def _ensure_running(self):
         if self._terminal:
             raise CatalogError("A terminal measurement is immutable")
@@ -314,37 +189,16 @@ class MetricOutput:
 
     def record_dataset(self, dataset):
         self._ensure_running()
-        sample_ids = list(dataset.img_ids)
-        annotations = Path(dataset.annotations_dir).expanduser().resolve()
-        dataset_root = annotations.parent.parent
-        part_dir = annotations.parent.parent / "annotations_PIDS" / annotations.name
-        part_available = [sample_id for sample_id in sample_ids if (part_dir / f"{sample_id}.npy").is_file()]
-        self.result["dataset"].update({
-            "split": "val",
-            "processed_root": str(annotations.parent.parent),
-            "annotations_directory": str(annotations),
-            "part_annotations_directory": str(part_dir),
-            "semantic_id_annotations_directory": str(
-                annotations.parent.parent / "annotations_SIDS" / annotations.name
-            ),
-            "candidate_count": len(sample_ids),
-            "part_annotation_count": len(part_available),
-            "part_annotation_coverage": len(part_available) / len(sample_ids) if sample_ids else None,
-            "semantic_id_annotation_count": sum(
-                (annotations.parent.parent / "annotations_SIDS" / annotations.name / f"{sample_id}.npy").is_file()
-                for sample_id in sample_ids
-            ),
-            "identity": "partial",
-        })
-        self.result["provenance_quality"]["warnings"] = [
-            "Dataset identity is partial; image paths are not content fingerprints.",
-            f"{len(sample_ids) - len(part_available)} candidates lack part annotations."
-            if len(sample_ids) != len(part_available) else "Every candidate has a part annotation.",
-        ]
-        if len(part_available) != len(sample_ids):
+        checkout = Path(__file__).resolve().parents[3]
+        sample_ids, dataset_fields, parts_fields, warnings, has_missing_parts = dataset_provenance(
+            dataset, self.data_type, checkout, self._input_hash_cache
+        )
+        self.result["dataset"].update(dataset_fields)
+        self.result["provenance_quality"]["warnings"] = warnings
+        if has_missing_parts:
             self.result["provenance_quality"]["missing_fields"].append("part annotation coverage")
-        mapping_metadata = self._part_mapping_metadata(dataset_root)
-        self.result["protocol"].setdefault("parts", {}).update(mapping_metadata)
+        self.result["protocol"].setdefault("parts", {}).update(parts_fields)
+        mapping_metadata = parts_fields
         mapping_identity = mapping_metadata["mapping_identity"]
         missing_fields = self.result["provenance_quality"]["missing_fields"]
         if mapping_identity.get("status") == "available":
@@ -363,83 +217,8 @@ class MetricOutput:
             missing_fields.append("part annotation provenance")
         if "parts.annotation_provenance" not in missing_fields:
             missing_fields.append("parts.annotation_provenance")
-        self.result["provenance_quality"]["warnings"].append(
-            "The preprocessing provenance linking part annotations to the mapping is unknown."
-        )
         self.set_candidates(sample_ids)
         self._write_result()
-
-    def _part_mapping_metadata(self, dataset_root):
-        annotation_provenance = "unknown"
-        if self.data_type == "cityscapes":
-            mapping_file = Path(__file__).resolve().parents[3] / "segmentation" / "data" / "cityscapes_parts.py"
-            human_parts = {"1": "torso", "2": "head", "3": "arm", "4": "leg"}
-            vehicle_parts = {
-                "1": "window",
-                "2": "wheel",
-                "3": "light",
-                "4": "license plate",
-                "5": "chassis",
-            }
-            definitions = {
-                "person": {"semantic_ids": [24], "part_id_to_name": human_parts},
-                "rider": {"semantic_ids": [25], "part_id_to_name": human_parts},
-                "car": {"semantic_ids": [26], "part_id_to_name": vehicle_parts},
-                "truck": {"semantic_ids": [27], "part_id_to_name": vehicle_parts},
-                "bus": {"semantic_ids": [28], "part_id_to_name": vehicle_parts},
-            }
-            mapping_identity = _file_identity(mapping_file, self._input_hash_cache)
-            mapping_identity["identity_kind"] = "official Cityscapes filter implementation"
-            return {
-                "mapping_identity": mapping_identity,
-                "class_dependent_part_definitions": definitions,
-                "annotation_provenance": annotation_provenance,
-            }
-
-        candidates = [Path(dataset_root) / "parts.yaml", Path(dataset_root).parent / "parts.yaml"]
-        if self.data_type == "pascal":
-            configured_source = os.environ.get("SOURCE_DATA_PATH_PASCAL")
-            if configured_source:
-                candidates.append(Path(configured_source).expanduser() / "parts.yaml")
-        mapping_file = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
-        if mapping_file is None:
-            return {
-                "mapping_identity": {
-                    "status": "unknown",
-                    "reason": "No configured parts.yaml mapping specification was available.",
-                },
-                "class_dependent_part_definitions": None,
-                "annotation_provenance": annotation_provenance,
-            }
-        try:
-            mapping = yaml.safe_load(mapping_file.read_text(encoding="utf-8"))
-            class_parts = mapping["scene_class2part_classes"]
-            countable_groups = mapping.get("countable_pids_groupings", {})
-            if not isinstance(class_parts, dict) or not isinstance(countable_groups, dict):
-                raise ValueError("unexpected Pascal part mapping schema")
-            definitions = {
-                str(class_name): {
-                    "semantic_class_id": class_index + 1,
-                    "part_ids": {str(part_name): part_index + 1 for part_index, part_name in enumerate(parts)},
-                    "countable_pid_groups": countable_groups.get(class_name, {}),
-                }
-                for class_index, (class_name, parts) in enumerate(class_parts.items())
-            }
-        except (OSError, UnicodeDecodeError, yaml.YAMLError, KeyError, TypeError, ValueError) as error:
-            return {
-                "mapping_identity": {
-                    "status": "invalid",
-                    "path": str(mapping_file),
-                    "reason": str(error)[:200],
-                },
-                "class_dependent_part_definitions": None,
-                "annotation_provenance": annotation_provenance,
-            }
-        return {
-            "mapping_identity": _file_identity(mapping_file, self._input_hash_cache),
-            "class_dependent_part_definitions": definitions,
-            "annotation_provenance": annotation_provenance,
-        }
 
     def set_candidates(self, sample_ids):
         self._ensure_running()
@@ -460,9 +239,7 @@ class MetricOutput:
         ]
         self._sample_index = {sample_id: index for index, sample_id in enumerate(candidates)}
         self.result["dataset"]["candidate_count"] = len(candidates)
-        self.result["dataset"]["candidate_order_sha256"] = hashlib.sha256(
-            json.dumps(candidates, separators=(",", ":"), ensure_ascii=False).encode()
-        ).hexdigest()
+        self.result["dataset"]["candidate_order_sha256"] = ordered_ids_sha256(candidates)
 
     def update_metadata(self, **fields):
         self._ensure_running()
@@ -472,7 +249,7 @@ class MetricOutput:
 
     def register_input(self, role, path):
         self._ensure_running()
-        self.result["model"]["inputs"][role] = _file_identity(path, self._input_hash_cache)
+        self.result["model"]["inputs"][role] = file_identity(path, self._input_hash_cache)
         self._write_result()
 
     def update_model_metadata(self, **fields):
@@ -621,20 +398,6 @@ class MetricOutput:
         )
         self._active_sample = None
 
-    def _population(self):
-        outcomes = [sample["outcome"] for sample in self._candidates or ()]
-        return {
-            "candidates": len(outcomes),
-            "attempted": sum(value in ("processed_no_observations", "contributed", "failed") for value in outcomes),
-            "processed": sum(value in ("processed_no_observations", "contributed") for value in outcomes),
-            "contributing": outcomes.count("contributed"),
-            "failed": outcomes.count("failed"),
-            "excluded": outcomes.count("excluded"),
-            "not_attempted": outcomes.count("not_attempted"),
-            "processed_no_observations": outcomes.count("processed_no_observations"),
-            "observations": len(self._observations),
-        }
-
     def _write_csv(self, filename, columns, rows):
         path = self.path / filename
         if filename in self._artifact_cache:
@@ -683,7 +446,7 @@ class MetricOutput:
             "observations": observation_artifact,
             "samples": sample_artifact,
         }
-        self.result["population"] = self._population()
+        self.result["population"] = population_counts(self._candidates, len(self._observations))
         contributing = list(dict.fromkeys(int(row["prototype_id"]) for row in self._observations))
         contributing.sort()
         self.result["contributing_prototype_ids"] = contributing
@@ -696,15 +459,11 @@ class MetricOutput:
             row["sample_id"] for row in self._candidates
             if row["outcome"] in ("processed_no_observations", "contributed")
         ]
-        self.result["dataset"]["processed_order_sha256"] = hashlib.sha256(
-            json.dumps(processed_ids, separators=(",", ":"), ensure_ascii=False).encode()
-        ).hexdigest()
+        self.result["dataset"]["processed_order_sha256"] = ordered_ids_sha256(processed_ids)
         contributing_ids = [
             row["sample_id"] for row in self._candidates if row["outcome"] == "contributed"
         ]
-        self.result["dataset"]["contributing_order_sha256"] = hashlib.sha256(
-            json.dumps(contributing_ids, separators=(",", ":"), ensure_ascii=False).encode()
-        ).hexdigest()
+        self.result["dataset"]["contributing_order_sha256"] = ordered_ids_sha256(contributing_ids)
         return True
 
     def _publish_terminal(self, status):
@@ -744,7 +503,7 @@ class MetricOutput:
 
     def fail(self, error):
         self._ensure_running()
-        message = _sanitize_error(error)
+        message = sanitize_error(error)
         if self._active_sample is not None and self._candidates is not None:
             row = self._candidates[self._sample_index[self._active_sample]]
             row.update(

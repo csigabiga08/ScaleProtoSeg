@@ -208,6 +208,10 @@ Set `MEASUREMENT_CATALOG_ROOT` in the job environment or in this checkout's igno
 `.env` file. The root must already exist and be writable; metrics do not fall back
 to `RESULTS_DIR`, and there is no `--output-dir` or catalog-root command-line option.
 `RESULTS_DIR` still locates stage-selected checkpoints and relative group names.
+Catalog configuration uses `python-dotenv` quoting, comments, and interpolation;
+an exported root takes precedence, and catalog lookup does not load other settings
+into the environment. Metadata validation uses Pydantic, pinned in both dependency
+profiles; filesystem integrity and scientific comparability are checked separately.
 
 `result.json` records schema version, run status, checkpoint identities and hashes,
 dataset identity coverage, the expanded metric protocol, selected and contributing

@@ -18,9 +18,12 @@ from segmentation.analysis.metrics.catalog import (
     iter_measurements,
     load_measurement,
     resolve_catalog_root,
+    validate_result,
 )
 from segmentation.analysis.metrics.output import MetricOutput
-import segmentation.analysis.metrics.output as metric_output
+from segmentation.analysis.metrics.population import ordered_ids_sha256, population_counts
+from segmentation.analysis.metrics.provenance import dataset_provenance
+import segmentation.analysis.metrics.provenance as metric_provenance
 
 
 class MetricCatalogTests(unittest.TestCase):
@@ -113,6 +116,50 @@ class MetricCatalogTests(unittest.TestCase):
         missing_fields.remove("model.prototype_activation_function")
         return output
 
+    def test_population_helpers_count_every_outcome_and_hash_unicode_order(self):
+        samples = [
+            {"outcome": "not_attempted"},
+            {"outcome": "excluded"},
+            {"outcome": "processed_no_observations"},
+            {"outcome": "contributed"},
+            {"outcome": "failed"},
+        ]
+        self.assertEqual(population_counts(samples, 4), {
+            "candidates": 5,
+            "attempted": 3,
+            "processed": 2,
+            "contributing": 1,
+            "failed": 1,
+            "excluded": 1,
+            "not_attempted": 1,
+            "processed_no_observations": 1,
+            "observations": 4,
+        })
+        self.assertEqual(
+            ordered_ids_sha256(["é", "雪", "e\u0301"]),
+            "68bfec7053b99f8ce472a529da024cb964df5a1d92e3fe304714f47359b4cef5",
+        )
+
+    def test_native_validator_rejects_population_and_candidate_order_corruption(self):
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            output.set_candidates(["é", "雪"])
+            output.mark_sample("é", "excluded", "fixture")
+            output.mark_sample("雪", "excluded", "fixture")
+            output.finish(value=0.0, numerator=0, denominator=1)
+            path = output.path / "result.json"
+            original = json.loads(path.read_text())
+            for mutation, message in (
+                (lambda value: value["population"].update(candidates=3), "Population count mismatch"),
+                (lambda value: value["dataset"].update(candidate_order_sha256="0" * 64), "candidate_order_sha256"),
+            ):
+                result = json.loads(json.dumps(original))
+                mutation(result)
+                path.write_text(json.dumps(result))
+                with self.assertRaisesRegex(CatalogError, message):
+                    load_measurement(output.path)
+            path.write_text(json.dumps(original))
+
     def test_helpers_import_without_torch_or_settings(self):
         code = (
             "import sys; "
@@ -152,10 +199,30 @@ class MetricCatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(CatalogError, "not writable"):
                 resolve_catalog_root(checkout=Path(self.temporary.name))
 
+    def test_dotenv_uses_standard_interpolation_without_loading_other_settings(self):
+        dotenv = Path(self.temporary.name) / ".env"
+        dotenv.write_text(
+            f'CATALOG_PARENT="{self.root.parent}"\n'
+            'MEASUREMENT_CATALOG_ROOT="${CATALOG_PARENT}/catalog" # shared output\n'
+            'UNRELATED_SETTING=do-not-load\n'
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(resolve_catalog_root(checkout=dotenv.parent), self.root.resolve())
+            self.assertNotIn("CATALOG_PARENT", os.environ)
+            self.assertNotIn("UNRELATED_SETTING", os.environ)
+
+    def test_dotenv_preserves_hash_in_quoted_path_with_trailing_comment(self):
+        root = self.root.parent / "catalog#shared"
+        root.mkdir()
+        dotenv = root.parent / ".env"
+        dotenv.write_text(f'MEASUREMENT_CATALOG_ROOT="{root}" # output root\n')
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(resolve_catalog_root(checkout=dotenv.parent), root.resolve())
+
     def test_identical_input_paths_are_hashed_once_for_separate_checkpoint_roles(self):
         with (
             patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}),
-            patch.object(metric_output, "sha256_file", wraps=metric_output.sha256_file) as hash_file,
+            patch.object(metric_provenance, "sha256_file", wraps=metric_provenance.sha256_file) as hash_file,
         ):
             output = MetricOutput(
                 "consistency",
@@ -271,6 +338,34 @@ class MetricCatalogTests(unittest.TestCase):
                         load_measurement(output.path)
             result_path.write_text(json.dumps(original))
             self.assertEqual(load_measurement(output.path)["status"], "complete")
+
+    def test_metadata_schema_rejects_wrong_protocol_types_without_coercion(self):
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            output.set_candidates([])
+            output.finish(value=0.0, numerator=0, denominator=1)
+            for section, field, value in (
+                ("consistency", "strict_comparison", 42),
+                ("consistency", "threshold", True),
+                ("activation", "normalization_mean", ["0.1", 0.2, 0.3]),
+            ):
+                with self.subTest(section=section, field=field):
+                    result = json.loads(json.dumps(output.result))
+                    result["protocol"][section][field] = value
+                    with self.assertRaises(CatalogError):
+                        validate_result(result)
+
+    def test_metadata_validation_preserves_extensions_and_explicit_nulls(self):
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            output.set_candidates([])
+            output.finish(value=0.0, numerator=0, denominator=1)
+            result = output.result
+            result["extension"] = {"unrecognized": [None, "preserve"]}
+            result["protocol"]["consistency"]["extension"] = {"note": None}
+            before = json.dumps(result, sort_keys=True)
+            self.assertIs(validate_result(result), result)
+            self.assertEqual(json.dumps(result, sort_keys=True), before)
 
     def test_completed_record_rejects_missing_checkpoint_identity_even_with_declared_gap(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
@@ -468,6 +563,36 @@ class MetricCatalogTests(unittest.TestCase):
                 },
             )
             self.assertEqual(parts["annotation_provenance"], "unknown")
+            self.assertEqual(
+                output.result["provenance_quality"]["warnings"].count(
+                    "The preprocessing provenance linking part annotations to the mapping is unknown."
+                ),
+                1,
+            )
+
+    def test_dataset_provenance_collects_candidate_coverage(self):
+        annotation_root = Path(self.temporary.name) / "processed" / "annotations" / "val"
+        annotation_root.mkdir(parents=True)
+        parts_root = annotation_root.parent.parent / "annotations_PIDS" / annotation_root.name
+        parts_root.mkdir(parents=True)
+        (parts_root / "one.npy").write_bytes(b"part")
+        dataset = type(
+            "Dataset",
+            (),
+            {"img_ids": ["one", "two"], "annotations_dir": str(annotation_root)},
+        )()
+
+        sample_ids, fields, parts, warnings, has_missing_parts = dataset_provenance(
+            dataset, "other", self.temporary.name, {}
+        )
+
+        self.assertEqual(sample_ids, ["one", "two"])
+        self.assertEqual(fields["candidate_count"], 2)
+        self.assertEqual(fields["part_annotation_count"], 1)
+        self.assertEqual(fields["part_annotation_coverage"], 0.5)
+        self.assertTrue(has_missing_parts)
+        self.assertEqual(parts["annotation_provenance"], "unknown")
+        self.assertEqual(len(warnings), 3)
 
     def test_loaded_model_runtime_is_added_to_protocol_not_model_seed(self):
         model = type(

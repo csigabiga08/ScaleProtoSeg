@@ -1,31 +1,26 @@
 """Render catalog consistency summaries without the legacy evaluator or path layout."""
 
-import csv
 import json
-import math
-import re
-from pathlib import Path
 
-from segmentation.analysis.metrics.catalog import CatalogError, resolve_catalog_root
+from pydantic import ValidationError
+
+from segmentation.analysis.metrics.catalog import create_fresh_output_dir, write_derived_csv
+from segmentation.analysis.metrics.schema import ComparableProtocol, KnownIdentity, unknown_fields
 
 
 class VisualizationError(ValueError):
     """Raised when selected measurements cannot be compared honestly."""
 
 
-def _known_checkpoint(record):
-    identity = record.get("model", {}).get("inputs", {}).get("prototype_checkpoint")
-    if not isinstance(identity, dict) or identity.get("status") != "available" or not _known_sha256(
-        identity.get("sha256")
-    ):
+def _known_checkpoint(record, role="prototype_checkpoint"):
+    identity = record.get("model", {}).get("inputs", {}).get(role)
+    try:
+        KnownIdentity.model_validate(identity)
+    except ValidationError as error:
         raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has unknown checkpoint identity; comparability is unverified"
-        )
+            f"Measurement {record.get('measurement_id')} has unknown {role} identity; comparability is unverified"
+        ) from error
     return identity["sha256"]
-
-
-def _known_sha256(value):
-    return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value) is not None
 
 
 def _protocol_without_quantile(record):
@@ -39,126 +34,19 @@ def _protocol_without_quantile(record):
             f"Measurement {record.get('measurement_id')} has unknown protocol version; "
             "comparability is unverified"
         )
-    required = (
-        "activation", "centroids", "parts", "classes", "prototype_selection", "consistency",
-        "input", "model",
-    )
-    if any(not isinstance(protocol.get(field), dict) or not protocol[field] for field in required):
+    try:
+        validated = ComparableProtocol.model_validate(protocol)
+    except ValidationError as error:
+        fields = ", ".join(".".join(map(str, item["loc"])) for item in error.errors())
         raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has incomplete protocol identity; comparability is unverified"
-        )
-    critical_fields = {
-        "activation.prototype_distance_activation": str,
-        "activation.prototype_activation_function": str,
-        "activation.resize_interpolation": str,
-        "activation.quantile_support": str,
-        "activation.quantile_interpolation": str,
-        "activation.active_comparison": str,
-        "activation.quantile_class_mask": str,
-        "centroids.component_rule": str,
-        "centroids.background_component_centroid_included": bool,
-        "centroids.exclude_background_centroid": bool,
-        "classes.id_convention": dict,
-        "classes.evaluation_class_id_to_label": dict,
-        "classes.ignored_or_void_evaluation_class_id": int,
-        "classes.excluded_evaluation_class_ids": list,
-        "prototype_selection.class_identity_rule": str,
-        "prototype_selection.excluded_evaluation_class_ids": list,
-        "prototype_selection.grouping_active": bool,
-        "prototype_selection.group_nonzero_rule": str,
-        "prototype_selection.group_intersection_rule": str,
-        "consistency.strict_comparison": str,
-        "consistency.aggregation": str,
-    }
-
-    def known_value(path, expected_type):
-        value = protocol
-        for component in path.split("."):
-            if not isinstance(value, dict) or component not in value:
-                raise VisualizationError(
-                    f"Measurement {record.get('measurement_id')} has unknown protocol field "
-                    f"{path}; comparability is unverified"
-                )
-            value = value[component]
-        valid = isinstance(value, expected_type)
-        if expected_type is str:
-            valid = valid and bool(value.strip()) and value.strip().casefold() not in {
-                "unknown", "unavailable", "partial", "null"
-            }
-        elif expected_type is dict:
-            valid = valid and bool(value)
-        elif expected_type is list:
-            valid = valid and all(item is not None for item in value)
-        if not valid:
-            raise VisualizationError(
-                f"Measurement {record.get('measurement_id')} has unknown protocol field "
-                f"{path}; comparability is unverified"
-            )
-        return value
-
-    for path, expected_type in critical_fields.items():
-        known_value(path, expected_type)
-    for path in (
-        "activation.normalization_mean",
-        "activation.normalization_std",
-        "input.normalization.mean",
-        "input.normalization.std",
-    ):
-        values = known_value(path, list)
-        if len(values) != 3 or any(
-            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
-            for value in values
-        ):
-            raise VisualizationError(
-                f"Measurement {record.get('measurement_id')} has unknown protocol field "
-                f"{path}; comparability is unverified"
-            )
-    for path in (
-        "input.source",
-        "input.resolution",
-        "input.normalization.conversion",
-        "model.prototype_activation_function",
-    ):
-        known_value(path, str)
-    epsilon = protocol["model"].get("epsilon")
-    if (
-        isinstance(epsilon, bool)
-        or not isinstance(epsilon, (int, float))
-        or not math.isfinite(epsilon)
-        or epsilon <= 0
-    ):
+            f"Measurement {record.get('measurement_id')} has incomplete protocol identity "
+            f"at {fields}; comparability is unverified"
+        ) from error
+    unknown = list(unknown_fields(validated, comparison=True))
+    if unknown:
         raise VisualizationError(
             f"Measurement {record.get('measurement_id')} has unknown protocol field "
-            "model.epsilon; comparability is unverified"
-        )
-    valid_part_ids = known_value("parts.valid_part_ids", list)
-    if not valid_part_ids or any(
-        isinstance(value, bool) or not isinstance(value, int) or value <= 0
-        for value in valid_part_ids
-    ):
-        raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has unknown protocol field "
-            "parts.valid_part_ids; comparability is unverified"
-        )
-    threshold = protocol["consistency"].get("threshold")
-    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold):
-        raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has unknown protocol field "
-            "consistency.threshold; comparability is unverified"
-        )
-    mapping = protocol["parts"].get("mapping_identity")
-    if (
-        not isinstance(mapping, dict)
-        or mapping.get("status") != "available"
-        or not _known_sha256(mapping.get("sha256"))
-    ):
-        raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has unknown part-mapping identity"
-        )
-    definitions = protocol["parts"].get("class_dependent_part_definitions")
-    if not isinstance(definitions, dict) or not definitions:
-        raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has unknown part definitions; comparability is unverified"
+            f"{', '.join(unknown)}; comparability is unverified"
         )
     normalized = json.loads(json.dumps(protocol, sort_keys=True))
     normalized.pop("quantile", None)
@@ -185,14 +73,7 @@ def _compatibility_signature(record):
         )
     inputs = record.get("model", {}).get("inputs", {})
     group = inputs.get("group_checkpoint")
-    if group is not None and (
-        not isinstance(group, dict)
-        or group.get("status") != "available"
-        or not _known_sha256(group.get("sha256"))
-    ):
-        raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has unknown group-checkpoint identity"
-        )
+    group_digest = None if group is None else _known_checkpoint(record, "group_checkpoint")
     parameters = record.get("parameters", {})
     if not isinstance(parameters, dict):
         raise VisualizationError(
@@ -203,35 +84,13 @@ def _compatibility_signature(record):
     parameters.pop("activation_quantile", None)
     return (
         _known_checkpoint(record),
-        None if group is None else group["sha256"],
+        group_digest,
         dataset.get("name"),
         dataset.get("split"),
         dataset_identity,
         _protocol_without_quantile(record),
         parameters,
     )
-
-
-def _ensure_external(path, root):
-    requested = Path(path).expanduser()
-    if requested.is_symlink():
-        raise CatalogError(f"Derived export directory cannot be a symlink: {requested}")
-    target = requested.resolve()
-    canonical = (Path(root) / "measurements").resolve()
-    if target == canonical or canonical in target.parents:
-        raise CatalogError(f"Derived exports must be outside catalog measurements: {target}")
-    return target
-
-
-def _write_csv(path, rows, fields):
-    with path.open("x", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({
-                key: json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else value
-                for key, value in row.items()
-            })
 
 
 def _class_label(record, class_id):
@@ -367,19 +226,7 @@ def render_measurements(records, summaries, output_dir, root=None):
     if any(value is None for value in quantiles):
         raise VisualizationError("Every selected measurement must have a protocol quantile")
 
-    root = Path(root) if root is not None else resolve_catalog_root()
-    output_dir = _ensure_external(output_dir, root)
-    if output_dir.exists() or output_dir.is_symlink():
-        raise CatalogError(
-            f"Derived output directory must not already exist; choose a fresh path: {output_dir}"
-        )
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        output_dir.mkdir()
-    except FileExistsError as error:
-        raise CatalogError(
-            f"Derived output directory must not already exist; choose a fresh path: {output_dir}"
-        ) from error
+    output_dir = create_fresh_output_dir(output_dir, root)
     tables, support_comparable = _tables(records, summaries)
     support_rows = tables["support"]
     if not support_comparable:
@@ -542,7 +389,7 @@ def render_measurements(records, summaries, output_dir, root=None):
         ]),
     }
     for filename, (rows, fields) in table_fields.items():
-        _write_csv(output_dir / filename, rows, fields)
+        write_derived_csv(output_dir / filename, rows, fields)
     with PdfPages(output_dir / "all_four_visualizations.pdf") as combined:
         for name, figure in figures:
             figure.savefig(output_dir / f"{name}.png", dpi=150, facecolor="white")
