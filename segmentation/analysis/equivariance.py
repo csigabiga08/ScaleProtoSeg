@@ -3,22 +3,33 @@
 import torch
 
 
-def quantile_map(activation_maps: torch.Tensor, quantile: float, class_mask: torch.Tensor) -> torch.Tensor:
-    """Threshold each activation channel using only pixels in a semantic class.
+def quantile_map(
+    activation_maps: torch.Tensor,
+    quantile: float,
+    class_mask: torch.Tensor = None,
+    *,
+    scope: str = "class",
+) -> torch.Tensor:
+    """Threshold each activation channel within a class or across the whole image.
 
     Args:
         activation_maps: Floating-point activations shaped ``(C, H, W)``.
         quantile: Quantile in ``[0, 1]``, computed independently per channel
             with linear interpolation.
         class_mask: Boolean mask shaped ``(H, W)`` selecting the semantic
-            class. Zero-valued activations within this mask are included.
+            class. Required for ``scope="class"``; ignored for ``scope="image"``.
+        scope: ``"class"`` (default) uses and activates only class pixels.
+            ``"image"`` uses and can activate every image pixel, without a
+            semantic mask. Zero-valued activations in either region are included.
 
     Returns:
         A boolean tensor shaped ``(H, W, C)`` on the activations' device.
-        Pixels must belong to the class and be strictly greater than their
+        Pixels in the selected region must be strictly greater than their
         channel's quantile to be active. Ties at the threshold are inactive;
-        an empty class mask returns an all-false map.
+        an empty region returns an all-false map.
     """
+    if scope not in ("class", "image"):
+        raise ValueError("scope must be 'class' or 'image'")
     if activation_maps.ndim != 3:
         raise ValueError("activation_maps must have shape (C, H, W)")
     if not activation_maps.is_floating_point():
@@ -26,6 +37,10 @@ def quantile_map(activation_maps: torch.Tensor, quantile: float, class_mask: tor
     if not 0 <= quantile <= 1:
         raise ValueError("quantile must be between 0 and 1")
 
+    if scope == "image":
+        class_mask = torch.ones(activation_maps.shape[1:], dtype=torch.bool, device=activation_maps.device)
+    elif class_mask is None:
+        raise ValueError("class_mask is required for scope='class'")
     class_mask = torch.as_tensor(class_mask, dtype=torch.bool, device=activation_maps.device)
     if class_mask.shape != activation_maps.shape[1:]:
         raise ValueError("class_mask must have shape (H, W) matching activation_maps")
@@ -34,7 +49,7 @@ def quantile_map(activation_maps: torch.Tensor, quantile: float, class_mask: tor
     class_values = activation_maps[:, class_mask]
     if class_values.shape[1] > 0:
         if not torch.isfinite(class_values).all():
-            raise ValueError("activations within class_mask must be finite")
+            raise ValueError("activations within the quantile region must be finite")
         # torch.quantile supports float32/float64; promote lower precision.
         if class_values.dtype not in (torch.float32, torch.float64):
             class_values = class_values.float()
@@ -42,3 +57,8 @@ def quantile_map(activation_maps: torch.Tensor, quantile: float, class_mask: tor
         binary_maps[:, class_mask] = class_values > thresholds
 
     return binary_maps.permute(1, 2, 0)
+
+
+def quantile_map_whole_image(activation_maps: torch.Tensor, quantile: float) -> torch.Tensor:
+    """Return a per-channel binary map using all image pixels, without class masking."""
+    return quantile_map(activation_maps, quantile, scope="image")
