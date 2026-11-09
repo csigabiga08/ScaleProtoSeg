@@ -171,8 +171,7 @@ python -m segmentation.eval_valid_multiscale <your_training_run_name> <training_
 # Generating predictions on cityscapes or pascal test set
 python -m segmentation.eval_test  <your_training_run_name> <training_stage> <batch_size> <flag_pascal>
 
-# Evaluation for consistency metric
-python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> <data_type> --quantile <quantile> --threshold <threshold> --group-name <group_training_run_name>
+# See "Native consistency and stability measurements" below
 ```
 
 ### ProtoSeg
@@ -187,8 +186,7 @@ python -m segmentation.eval_valid_multiscale <your_training_run_name> <training_
 # Generating predictions on cityscapes or pascal test set
 python -m segmentation.eval_test  <your_training_run_name> <training_stage> <batch_size> <flag_pascal>
 
-# Evaluation for consistency metric
-python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> <data_type> --quantile <quantile> --threshold <threshold>
+# See "Native consistency and stability measurements" below
 ```
 
 ### Native consistency and stability measurements
@@ -229,43 +227,50 @@ Both calculators accept these part and centroid options:
 
 | Desired configuration | Option | Folder label |
 |---|---|---|
-| All decoded parts | No part-filter flag | `allparts` |
-| Official Cityscapes semantic/part pairs | `--official-parts-only` | `filteredparts` |
-| Pascal parts matching the VOC semantic class | `--require-semantic-match` | `filteredparts` |
+| All decoded parts | Default | `allparts` |
+| Official Cityscapes semantic/part pairs | `official_parts_only=true` | `filteredparts` |
+| Pascal parts matching the VOC semantic class | `require_semantic_match=true` | `filteredparts` |
 | Foreground and background centroids | Default | `background` |
-| Foreground part-component centroids only | `--exclude-background-centroid` | `foreground` |
+| Foreground part-component centroids only | `exclude_background_centroid=true` | `foreground` |
 
 Both filtered modes require the native `annotations_SIDS` cache. Filtering is applied
 in memory to both clean and noisy images and does not modify cached labels. The exact
 filter is recorded in the description; Pascal semantic matching does not apply the
 Cityscapes taxonomy.
 
-Select an exact evaluated checkpoint with `--checkpoint` for consistency or
-`--checkpoint-path` for stability. Select a prototype-filter checkpoint using
-`--group-checkpoint /path/to/group.pth` on either calculator, or retain the existing
-`--group-name /path/to/group_run` option. Stability also accepts `--seed` (default 0).
-Output directories are allocated automatically from `MEASUREMENT_CATALOG_ROOT`.
-
-After configuring a writable catalog root, submit a single-quantile Pascal stability job:
+Run either calculator from the repository root as a Python module. Supply config
+fields as bare Hydra `key=value` overrides (not positional arguments or `--` flags).
+The following Pascal examples select exact evaluated checkpoints and a prototype
+filter checkpoint:
 
 ```bash
-sbatch --output="$PWD/stability-%j.out" scripts/run_metric.slurm \
-  stability scaleproto_pascal push pascal \
-  --checkpoint-path /data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
-  --group-name /data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal \
-  --quantile 0.8 --std-dev 0.2
+python -m segmentation.analysis.metrics.consistency \
+  model_name=scaleproto_pascal training_phase=push data_type=pascal \
+  checkpoint=/data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
+  group_checkpoint=/data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal/checkpoints/th-0.05-nopush-group_last.pth \
+  quantile=0.8 threshold=0.8 require_semantic_match=true exclude_background_centroid=true
+
+python -m segmentation.analysis.metrics.stability \
+  model_name=scaleproto_pascal training_phase=push data_type=pascal \
+  checkpoint_path=/data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
+  group_checkpoint=/data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal/checkpoints/th-0.05-nopush-group_last.pth \
+  quantile=0.8 std_dev=0.2 seed=0 require_semantic_match=true exclude_background_centroid=true
 ```
 
-To use Pascal semantic matching and foreground centroids, append
-`--require-semantic-match --exclude-background-centroid`. To run consistency, use:
-
-```bash
-sbatch --output="$PWD/consistency-%j.out" scripts/run_metric.slurm \
-  consistency scaleproto_pascal push pascal \
-  --checkpoint /data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
-  --group-name /data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal \
-  --quantile 0.8 --threshold 0.8
-```
+The common required overrides are `model_name`, `training_phase`, and `data_type`.
+Without an explicit checkpoint override, each calculator selects the checkpoint for
+that model and phase under `RESULTS_DIR`. Consistency uses `checkpoint=...` to select
+an exact evaluated checkpoint; stability uses `checkpoint_path=...`. Either accepts
+`group_checkpoint=...` for an exact prototype-filter checkpoint or `group_name=...`
+to resolve the existing group checkpoint under `RESULTS_DIR`. The metric-specific
+protocol values are also Hydra overrides: consistency accepts `quantile` and
+`threshold`, while stability accepts `quantile`, `std_dev`, and `seed` (default 0).
+Part selection and centroid behavior are controlled by `official_parts_only`,
+`require_semantic_match`, and `exclude_background_centroid`; set the applicable
+boolean to `true` as shown above. These options are recorded in the result protocol.
+Pascal semantic matching applies only to Pascal, and official-parts filtering applies
+only to Cityscapes. Output directories are allocated automatically from
+`MEASUREMENT_CATALOG_ROOT`.
 
 The Slurm wrapper requests one GPU on TANK, eight CPUs, and 32 GB of memory.
 Override the node with `sbatch --nodelist=maxitank ...` when using that node's checkout
