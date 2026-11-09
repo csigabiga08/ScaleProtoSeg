@@ -47,6 +47,7 @@ def proto_filter(ppnet: PPNetMultiScale) -> List[int]:
     return tot_list_proto_ids
 
 
+@argh.arg("--quantile-scope", choices=("class", "image"))
 def run_stability(
     model_name: str,
     training_phase: str,
@@ -63,6 +64,7 @@ def run_stability(
     seed: int = 0,
     exclude_background_centroid: bool = False,
     merge_left_right_parts: bool = False,
+    quantile_scope: str = "class",
 ):
     """Wrapper to compute the stability across validation sets
 
@@ -71,6 +73,8 @@ def run_stability(
         training_phase (str):  Training phase for loading the model.
         data_type (str): Data type for testing: Cityscapes & Pascal.
         quantile (float, optional): Quantile to threshold the prototype activations. Defaults to 0.8.
+        quantile_scope (str): "class" (default) restricts the quantile and active
+            area to the semantic class; "image" uses the whole image without masking.
         std_dev (float, optional): Standard deviation of the noise injected. Defaults to 0.2.
         group_name (str, optional): Name of the model when grouping is used. Defaults to None.
         output_dir (str, optional): Exact output directory, overriding the default
@@ -88,6 +92,8 @@ def run_stability(
         NotImplementedError: Data type not supported.
     """
 
+    if quantile_scope not in ("class", "image"):
+        raise ValueError("quantile_scope must be 'class' or 'image'")
     if official_parts_only and data_type != "cityscapes":
         raise ValueError("official_parts_only is supported only for cityscapes")
     if require_semantic_match and data_type != "pascal":
@@ -131,6 +137,7 @@ def run_stability(
         raise NotImplementedError(f"Data type {data_type} not supported")
 
     log(f"Loading model from {checkpoint_path}")
+    log(f"Activation quantile scope: {quantile_scope}")
     log(f"Part labels: {'official Cityscapes parts only' if official_parts_only else 'all decoded part IDs'}")
     if data_type == "pascal":
         log(f"Pascal semantic agreement: {'required' if require_semantic_match else 'not required (legacy)'}")
@@ -161,6 +168,7 @@ def run_stability(
         require_semantic_match=require_semantic_match,
         exclude_background_centroid=exclude_background_centroid, output_dir=output_dir,
         merge_left_right_parts=merge_left_right_parts,
+        quantile_scope=quantile_scope,
         part_groups=left_right_part_groups() if merge_left_right_parts else None,
     )
     output_path = str(output.path)
@@ -217,11 +225,13 @@ def run_stability(
             img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile, proto_ids,
             exclude_background_centroid=exclude_background_centroid,
             merge_left_right_parts=merge_left_right_parts,
+            quantile_scope=quantile_scope,
         )
         _, noise_part_presence_list = part_intersect(
             img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile, proto_ids, std_dev,
             exclude_background_centroid=exclude_background_centroid,
             merge_left_right_parts=merge_left_right_parts,
+            quantile_scope=quantile_scope,
         )
 
         tot_presence.extend(part_presence_list)
@@ -264,6 +274,7 @@ def part_intersect(
     *,
     exclude_background_centroid: bool = False,
     merge_left_right_parts: bool = False,
+    quantile_scope: str = "class",
 ) -> Tuple[Dict[int, List[int]], List[List[Any]]]:
     """Compute intersection between part labels and prototype activations."""
 
@@ -327,6 +338,7 @@ def part_intersect(
                     torch.from_numpy(upsampled_act_img_j[None, :, :]),
                     quantile,
                     class_mask=torch.from_numpy(y_mask),
+                    scope=quantile_scope,
                 ).numpy()
 
                 for part_id, centroids in part_centroids.items():

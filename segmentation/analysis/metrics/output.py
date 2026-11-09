@@ -29,9 +29,11 @@ def output_directory(
     metric, checkpoint, data_type, *, quantile, threshold=None, std_dev=None,
     seed=None, group_checkpoint=None, official_parts_only=False,
     require_semantic_match=False, exclude_background_centroid=False, output_dir=None,
-    merge_left_right_parts=False,
+    merge_left_right_parts=False, quantile_scope="class",
 ):
     """Return the model's shared folder for this part/centroid configuration."""
+    if quantile_scope not in ("class", "image"):
+        raise ValueError("quantile_scope must be 'class' or 'image'")
     if output_dir is not None:
         return Path(output_dir).expanduser().resolve()
     checkpoint = Path(checkpoint).expanduser().resolve()
@@ -61,6 +63,8 @@ class MetricOutput:
             tokens.append(f"seed_{parameters['seed']}")
         if parameters.get("merge_left_right_parts"):
             tokens.append("lrmerged")
+        if parameters.get("quantile_scope", "class") == "image":
+            tokens.append("qscope_image")
         tokens.extend((f"checkpoint_{_label(Path(checkpoint).stem)}", f"group_{group}"))
         self.file_suffix = "_".join(tokens)
         self.metric = metric
