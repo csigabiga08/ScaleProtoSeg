@@ -4,18 +4,20 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import argh
 import cv2
+import hydra
 import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
+from omegaconf import DictConfig, OmegaConf
 from torchvision import transforms
 from tqdm import tqdm
 
 from find_nearest import to_normalized_tensor
 from segmentation.analysis.equivariance import quantile_map
 from segmentation.analysis.metrics.output import MetricOutput
+from segmentation.analysis.metrics.protocol import StabilityRunInput
 from segmentation.checkpoints import load_model_checkpoint
 from segmentation.constants import (
     CITYSCAPES_19_EVAL_CATEGORIES,
@@ -59,34 +61,6 @@ def _selected_prototypes(model, allowed_ids):
     ]
 
 
-def _protocol(data_type, class_map, semantic_map, max_parts, *, quantile, std_dev, seed,
-              official_parts_only, require_semantic_match, exclude_background_centroid):
-    return {
-        "metric": "stability",
-        "quantile": quantile,
-        "parts": {
-            "valid_part_ids": list(range(1, max_parts + 1)),
-            "official_parts_only": official_parts_only,
-            "require_semantic_match": require_semantic_match,
-            "exclude_background_centroid": exclude_background_centroid,
-        },
-        "classes": {
-            "semantic_id_to_evaluation_id": semantic_map,
-            "evaluation_class_id_to_label": {str(key + 1): value for key, value in class_map.items()},
-            "background_evaluation_class_id": 1 if data_type == "pascal" else None,
-        },
-        "stability": {
-            "standard_deviation": std_dev,
-            "seed": seed,
-            "aggregation": "unweighted mean of exact all-part equality per paired sample/class/prototype row",
-        },
-        "observation_columns": (
-            [f"part_{part_id}" for part_id in range(max_parts + 1)]
-            + [f"noisy_part_{part_id}" for part_id in range(max_parts + 1)]
-        ),
-    }
-
-
 def _paired_rows(part_rows, noisy_rows, max_parts):
     columns = [f"part_{part_id}" for part_id in range(max_parts + 1)] + ["proto_id", "class", "img_id"]
     noisy_columns = [
@@ -122,39 +96,28 @@ def _add_observations(output, paired, class_map, max_parts):
         output.add_observation(**observation)
 
 
-def run_stability(
-    model_name: str,
-    training_phase: str,
-    data_type: str,
-    quantile: float = 0.8,
-    std_dev: float = 0.2,
-    group_name: str = None,
-    checkpoint_path: str = None,
-    *,
-    group_checkpoint: Optional[str] = None,
-    official_parts_only: bool = False,
-    require_semantic_match: bool = False,
-    seed: int = 0,
-    exclude_background_centroid: bool = False,
-):
+def run_stability(run_input: StabilityRunInput):
     """Wrapper to compute the stability across validation sets
 
     Args:
-        model_name (str): Name of the model for testing.
-        training_phase (str):  Training phase for loading the model.
-        data_type (str): Data type for testing: Cityscapes & Pascal.
-        quantile (float, optional): Quantile to threshold the prototype activations. Defaults to 0.8.
-        std_dev (float, optional): Standard deviation of the noise injected. Defaults to 0.2.
-        group_name (str, optional): Name of the model when grouping is used. Defaults to None.
-        group_checkpoint (str, optional): Explicit prototype-filter checkpoint,
-            overriding group_name.
-        official_parts_only (bool): Keep only documented Cityscapes semantic/part pairs.
-        require_semantic_match (bool): For Pascal, require part/VOC semantic agreement.
-        seed (int): Random noise seed. Defaults to 0.
+        run_input: Validated model, dataset, checkpoint and metric options.
 
     Raises:
         NotImplementedError: Data type not supported.
     """
+
+    model_name = run_input.model_name
+    training_phase = run_input.training_phase
+    data_type = run_input.data_type
+    quantile = run_input.quantile
+    std_dev = run_input.std_dev
+    group_name = run_input.group_name
+    checkpoint_path = run_input.checkpoint_path
+    group_checkpoint = run_input.group_checkpoint
+    official_parts_only = run_input.official_parts_only
+    require_semantic_match = run_input.require_semantic_match
+    seed = run_input.seed
+    exclude_background_centroid = run_input.exclude_background_centroid
 
     if official_parts_only and data_type != "cityscapes":
         raise ValueError("official_parts_only is supported only for cityscapes")
@@ -199,10 +162,16 @@ def run_stability(
             group_path = os.path.join(os.environ["RESULTS_DIR"], group_name)
             checkpoint_path_group = os.path.join(group_path, "checkpoints/th-0.05-nopush-group_last.pth")
 
-    protocol = _protocol(
-        data_type, cls2name, ID_MAPPING, MAX_PARTS, quantile=quantile, std_dev=std_dev, seed=seed,
-        official_parts_only=official_parts_only, require_semantic_match=require_semantic_match,
-        exclude_background_centroid=exclude_background_centroid,
+    protocol = run_input.to_protocol(
+        semantic_id_to_evaluation_id=ID_MAPPING,
+        evaluation_class_id_to_label={
+            str(key + 1): value for key, value in cls2name.items()
+        },
+        valid_part_ids=range(1, MAX_PARTS + 1),
+        observation_columns=(
+            [f"part_{part_id}" for part_id in range(MAX_PARTS + 1)]
+            + [f"noisy_part_{part_id}" for part_id in range(MAX_PARTS + 1)]
+        ),
     )
     output = MetricOutput(
         "stability", checkpoint_path, data_type, model_name=model_name,
@@ -413,5 +382,25 @@ def part_intersect(
     return part_presence, part_presence_list
 
 
+def _run_config(config: DictConfig):
+    values = OmegaConf.to_container(config, resolve=True)
+    if not isinstance(values, dict):
+        raise TypeError("Stability configuration must resolve to a mapping")
+    values.pop("hydra", None)
+    run_input = StabilityRunInput.model_validate(values)
+    return run_stability(run_input)
+
+
+@hydra.main(
+    version_base=None,
+    config_path=str(
+        (Path(__file__).resolve().parent / "../../../config/hydra/metrics").resolve()
+    ),
+    config_name="stability",
+)
+def main(config: DictConfig):
+    _run_config(config)
+
+
 if __name__ == "__main__":
-    argh.dispatch_command(run_stability)
+    main()

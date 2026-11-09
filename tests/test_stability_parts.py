@@ -9,12 +9,14 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-import argh
+from hydra import compose, initialize_config_dir
 import numpy as np
 import torch
 from PIL import Image
+from pydantic import ValidationError
 
 from segmentation.analysis.metrics import stability
+from segmentation.analysis.metrics.protocol import StabilityRunInput
 
 
 def latest_record(root):
@@ -23,6 +25,108 @@ def latest_record(root):
 
 
 class StabilityPartsTests(unittest.TestCase):
+    def test_stability_serializer_preserves_existing_protocol_and_columns(self):
+        run = StabilityRunInput(
+            model_name="model",
+            training_phase="push",
+            data_type="pascal",
+            quantile=0.7,
+            std_dev=0.35,
+            seed=41,
+            official_parts_only=False,
+            require_semantic_match=True,
+            exclude_background_centroid=True,
+        )
+
+        protocol = run.to_protocol(
+            semantic_id_to_evaluation_id={1: 2, 2: 3},
+            evaluation_class_id_to_label={"2": "aeroplane", "3": "bicycle"},
+            valid_part_ids=[1, 2, 3],
+            observation_columns=[
+                "part_0", "part_1", "part_2", "part_3",
+                "noisy_part_0", "noisy_part_1", "noisy_part_2", "noisy_part_3",
+            ],
+        )
+
+        self.assertEqual(protocol, {
+            "metric": "stability",
+            "quantile": 0.7,
+            "parts": {
+                "valid_part_ids": [1, 2, 3],
+                "official_parts_only": False,
+                "require_semantic_match": True,
+                "exclude_background_centroid": True,
+            },
+            "classes": {
+                "semantic_id_to_evaluation_id": {1: 2, 2: 3},
+                "evaluation_class_id_to_label": {"2": "aeroplane", "3": "bicycle"},
+                "background_evaluation_class_id": 1,
+            },
+            "stability": {
+                "standard_deviation": 0.35,
+                "seed": 41,
+                "aggregation": (
+                    "unweighted mean of exact all-part equality per paired "
+                    "sample/class/prototype row"
+                ),
+            },
+            "observation_columns": [
+                "part_0", "part_1", "part_2", "part_3",
+                "noisy_part_0", "noisy_part_1", "noisy_part_2", "noisy_part_3",
+            ],
+        })
+
+    def test_stability_hydra_config_hands_validated_input_to_runner(self):
+        config_dir = Path(__file__).resolve().parents[1] / "config" / "hydra" / "metrics"
+        with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
+            config = compose(
+                config_name="stability",
+                overrides=[
+                    "model_name=test-model",
+                    "training_phase=push",
+                    "data_type=pascal",
+                    "std_dev=0.35",
+                    "seed=41",
+                ],
+            )
+            with patch.object(stability, "run_stability") as runner:
+                stability._run_config(config)
+
+        run_input = runner.call_args.args[0]
+        self.assertIsInstance(run_input, StabilityRunInput)
+        self.assertEqual(run_input.model_name, "test-model")
+        self.assertEqual(run_input.training_phase, "push")
+        self.assertEqual(run_input.data_type, "pascal")
+        self.assertEqual(run_input.std_dev, 0.35)
+        self.assertEqual(run_input.seed, 41)
+
+    def test_stability_hydra_config_defaults_seed_and_rejects_unknown_fields(self):
+        config_dir = Path(__file__).resolve().parents[1] / "config" / "hydra" / "metrics"
+        with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
+            config = compose(
+                config_name="stability",
+                overrides=[
+                    "model_name=test-model",
+                    "training_phase=push",
+                    "data_type=cityscapes",
+                ],
+            )
+            with patch.object(stability, "run_stability") as runner:
+                stability._run_config(config)
+            self.assertEqual(runner.call_args.args[0].seed, 0)
+
+            config_with_unknown_field = compose(
+                config_name="stability",
+                overrides=[
+                    "model_name=test-model",
+                    "training_phase=push",
+                    "data_type=cityscapes",
+                    "+unexpected_field=true",
+                ],
+            )
+            with self.assertRaises(ValidationError):
+                stability._run_config(config_with_unknown_field)
+
     def test_stability_observations_use_one_based_evaluator_class_ids(self):
         import pandas as pd
 
@@ -38,23 +142,19 @@ class StabilityPartsTests(unittest.TestCase):
         observation = output.add_observation.call_args.kwargs
         self.assertEqual(observation["class_id"], 2)
 
-        protocol = stability._protocol(
-            "pascal", {1: "aeroplane"}, stability.PASCAL_ID_MAPPING, max_parts,
-            quantile=0.8, std_dev=0.2, seed=41, official_parts_only=False,
-            require_semantic_match=False, exclude_background_centroid=False,
-        )
-        self.assertEqual(protocol["classes"]["evaluation_class_id_to_label"], {"2": "aeroplane"})
-        self.assertEqual(protocol["stability"]["seed"], 41)
-
-    def test_output_directory_cli_option_is_removed(self):
+    def test_runner_accepts_only_validated_stability_input(self):
         self.assertNotIn("output_dir", inspect.signature(stability.run_stability).parameters)
-        with patch.object(stability, "load_model_checkpoint") as load:
-            with self.assertRaises(SystemExit):
-                argh.dispatch_command(
-                    stability.run_stability,
-                    argv=["model", "push", "pascal", "--output-dir", "ignored"],
-                )
-            load.assert_not_called()
+        self.assertEqual(
+            list(inspect.signature(stability.run_stability).parameters),
+            ["run_input"],
+        )
+        with self.assertRaises(ValidationError):
+            StabilityRunInput(
+                model_name="model",
+                training_phase="push",
+                data_type="pascal",
+                output_dir="ignored",
+            )
 
     def test_background_centroid_can_create_a_false_part_hit(self):
         image = Image.new("RGB", (5, 5))
@@ -95,7 +195,7 @@ class StabilityPartsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different pairing keys"):
             stability._paired_rows([row], [unmatched], stability.MAX_PARTS_PASCAL)
 
-    def test_cli_applies_flag_to_both_images_and_separates_results(self):
+    def test_runner_applies_flag_to_both_images_and_separates_results(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
             root = Path(tmp)
             checkpoint = root / "model" / "checkpoints" / "nopush_best.pth"
@@ -119,10 +219,12 @@ class StabilityPartsTests(unittest.TestCase):
             dataset.get_img_path.return_value = str(image_path)
             observation = [0] * (stability.MAX_PARTS_PASCAL + 1) + [0, "aeroplane", "sample"]
             checkpoint = root / "model" / "checkpoints" / "nopush_best.pth"
-            argv = [
-                "model", "nopush", "pascal", "--quantile", "0.8", "--std-dev", "0.2",
-                "--checkpoint-path", str(checkpoint),
-            ]
+            run_input = StabilityRunInput(
+                model_name="model",
+                training_phase="nopush",
+                data_type="pascal",
+                checkpoint_path=str(checkpoint),
+            )
             with (
                 patch.dict(os.environ, {
                     "RESULTS_DIR": str(root),
@@ -132,12 +234,14 @@ class StabilityPartsTests(unittest.TestCase):
                 patch.object(stability, "PatchClassificationDataset", return_value=dataset),
                 patch.object(stability, "part_intersect", return_value=({}, [observation])) as intersect,
             ):
-                argh.dispatch_command(stability.run_stability, argv=argv)
+                stability.run_stability(run_input)
                 legacy_bundle, legacy_record = latest_record(catalog_root)
                 self.assertEqual(legacy_record["status"], "complete")
                 self.assertEqual(legacy_record["scores"]["stability"]["value"], 1.0)
 
-                argh.dispatch_command(stability.run_stability, argv=argv + ["--exclude-background-centroid"])
+                stability.run_stability(
+                    run_input.model_copy(update={"exclude_background_centroid": True})
+                )
                 load_model.assert_called_with(str(checkpoint))
                 self.assertEqual(intersect.call_count, 4)
                 self.assertEqual(
