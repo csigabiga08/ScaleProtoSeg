@@ -14,6 +14,7 @@ threshold: 0.8
 official_parts_only: false
 require_semantic_match: false
 exclude_background_centroid: false
+merge_left_right_parts: false
 
 hydra:
   run:

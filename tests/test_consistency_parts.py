@@ -91,6 +91,7 @@ class ConsistencyPartsTests(unittest.TestCase):
                     "official_parts_only": False,
                     "require_semantic_match": True,
                     "exclude_background_centroid": True,
+                    "merge_left_right_parts": False,
                 },
                 "classes": {
                     "semantic_id_to_evaluation_id": consistency.PASCAL_ID_MAPPING,
@@ -134,6 +135,7 @@ class ConsistencyPartsTests(unittest.TestCase):
                     "threshold=0.9",
                     "require_semantic_match=true",
                     "exclude_background_centroid=true",
+                    "merge_left_right_parts=true",
                 ],
             )
         with patch.object(consistency, "run_consistency") as runner:
@@ -148,6 +150,7 @@ class ConsistencyPartsTests(unittest.TestCase):
         self.assertEqual(model.threshold, 0.9)
         self.assertTrue(model.require_semantic_match)
         self.assertTrue(model.exclude_background_centroid)
+        self.assertTrue(model.merge_left_right_parts)
 
     def test_hydra_config_defaults_and_required_model_fields(self):
         with initialize_config_dir(config_dir=hydra_config_directory(), version_base=None):
@@ -157,6 +160,7 @@ class ConsistencyPartsTests(unittest.TestCase):
         self.assertFalse(config.official_parts_only)
         self.assertFalse(config.require_semantic_match)
         self.assertFalse(config.exclude_background_centroid)
+        self.assertFalse(config.merge_left_right_parts)
         with self.assertRaises(ValidationError):
             consistency._run_config(config)
 
@@ -323,6 +327,17 @@ class ConsistencyPartsTests(unittest.TestCase):
                 _, foreground_record = latest_record(catalog_root)
                 self.assertTrue(foreground_record["protocol"]["parts"]["exclude_background_centroid"])
 
+                consistency.run_consistency(
+                    run_input(
+                        require_semantic_match=True,
+                        merge_left_right_parts=True,
+                    )
+                )
+                self.assertTrue(intersect.call_args.kwargs["merge_left_right_parts"])
+                _, merged_record = latest_record(catalog_root)
+                self.assertTrue(merged_record["protocol"]["parts"]["merge_left_right_parts"])
+                self.assertIn("person", merged_record["protocol"]["parts"]["left_right_part_groups"])
+
                 # Reject shapes which NumPy would otherwise silently broadcast.
                 np.save(native_dir / "sample.npy", [[15]])
                 with self.assertRaisesRegex(ValueError, "matching shapes"):
@@ -362,6 +377,33 @@ class ConsistencyPartsTests(unittest.TestCase):
 
         self.assertEqual(legacy[0][1], 1)
         self.assertEqual(foreground[0][1], 0)
+
+    def test_left_right_hit_uses_the_canonical_part_and_ignores_the_other(self):
+        image = Image.new("RGB", (5, 5))
+        semantic = np.full((5, 5), 2, dtype=np.int64)
+        parts = np.zeros((5, 5), dtype=np.int64)
+        parts[0, 0] = 16
+        distances = torch.full((1, 1, 5, 5), 10.0)
+        distances[0, 0, 0, 0] = 0.1
+        model = MagicMock()
+        model.epsilon = 1e-4
+        model.prototype_class_identity = torch.zeros((1, 21))
+        model.prototype_class_identity[0, 1] = 1
+        model.forward_from_conv_features.return_value = (None, distances)
+
+        with (
+            patch.object(consistency, "to_normalized_tensor", return_value=torch.zeros((3, 5, 5))),
+            patch.object(torch.Tensor, "cuda", lambda self: self),
+            patch.object(consistency, "MAX_PARTS", 24, create=True),
+        ):
+            _, rows = consistency.part_intersect(
+                image, semantic, parts, model, {1: "person"}, "sample", 0.8,
+                exclude_background_centroid=True,
+                merge_left_right_parts=True,
+            )
+
+        self.assertEqual(rows[0][13], 1)
+        self.assertTrue(np.isnan(rows[0][16]))
 
     def test_population_counts_missing_annotations_and_empty_observations(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:

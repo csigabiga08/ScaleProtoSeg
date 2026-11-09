@@ -243,18 +243,30 @@ fields as bare Hydra `key=value` overrides (not positional arguments or `--` fla
 The following Pascal examples select exact evaluated checkpoints and a prototype
 filter checkpoint:
 
+### Pascal left/right part merging
+
+Set `merge_left_right_parts=true` for either metric to treat Pascal's 54
+class-specific left/right pairs as one candidate part. Centroids remain computed
+from the original masks; their binary hits are ORed per image, without modifying
+cached labels. Consistency ignores a pair when neither side is annotated. Stability
+merges the clean and noisy hits independently before comparing their vectors.
+Unpaired parts are unchanged. The protocol records the canonical IDs and source
+labels for all 54 pairs.
+
 ```bash
 python -m segmentation.analysis.metrics.consistency \
   model_name=scaleproto_pascal training_phase=push data_type=pascal \
   checkpoint=/data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
   group_checkpoint=/data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal/checkpoints/th-0.05-nopush-group_last.pth \
-  quantile=0.8 threshold=0.8 require_semantic_match=true exclude_background_centroid=true
+  quantile=0.8 threshold=0.8 require_semantic_match=true \
+  exclude_background_centroid=true merge_left_right_parts=true
 
 python -m segmentation.analysis.metrics.stability \
   model_name=scaleproto_pascal training_phase=push data_type=pascal \
   checkpoint_path=/data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
   group_checkpoint=/data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal/checkpoints/th-0.05-nopush-group_last.pth \
-  quantile=0.8 std_dev=0.2 seed=0 require_semantic_match=true exclude_background_centroid=true
+  quantile=0.8 std_dev=0.2 seed=0 require_semantic_match=true \
+  exclude_background_centroid=true merge_left_right_parts=true
 ```
 
 The common required overrides are `model_name`, `training_phase`, and `data_type`.
@@ -266,8 +278,9 @@ to resolve the existing group checkpoint under `RESULTS_DIR`. The metric-specifi
 protocol values are also Hydra overrides: consistency accepts `quantile` and
 `threshold`, while stability accepts `quantile`, `std_dev`, and `seed` (default 0).
 Part selection and centroid behavior are controlled by `official_parts_only`,
-`require_semantic_match`, and `exclude_background_centroid`; set the applicable
-boolean to `true` as shown above. These options are recorded in the result protocol.
+`require_semantic_match`, `exclude_background_centroid`, and
+`merge_left_right_parts`; set the applicable boolean to `true` as shown above.
+These options are recorded in the result protocol.
 Pascal semantic matching applies only to Pascal, and official-parts filtering applies
 only to Cityscapes. Output directories are allocated automatically from
 `MEASUREMENT_CATALOG_ROOT`.

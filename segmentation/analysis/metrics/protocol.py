@@ -17,6 +17,7 @@ class MetricRunInput(BaseModel):
     official_parts_only: bool = False
     require_semantic_match: bool = False
     exclude_background_centroid: bool = False
+    merge_left_right_parts: bool = False
 
     @model_validator(mode="after")
     def validate_dataset_flags(self):
@@ -24,18 +25,30 @@ class MetricRunInput(BaseModel):
             raise ValueError("official_parts_only is supported only for cityscapes")
         if self.require_semantic_match and self.data_type != "pascal":
             raise ValueError("require_semantic_match is supported only for pascal")
+        if self.merge_left_right_parts and self.data_type != "pascal":
+            raise ValueError("merge_left_right_parts is supported only for pascal")
         return self
 
     def _protocol_parts(
         self,
         valid_part_ids: Sequence[int],
+        left_right_part_groups: Optional[Mapping[str, Sequence[Mapping[str, object]]]],
     ) -> Dict[str, object]:
-        return {
+        parts = {
             "valid_part_ids": list(valid_part_ids),
             "official_parts_only": self.official_parts_only,
             "require_semantic_match": self.require_semantic_match,
             "exclude_background_centroid": self.exclude_background_centroid,
+            "merge_left_right_parts": self.merge_left_right_parts,
         }
+        if self.merge_left_right_parts:
+            if left_right_part_groups is None:
+                raise ValueError("Merged Pascal parts require their canonical group definitions")
+            parts["left_right_part_groups"] = {
+                name: [dict(group) for group in groups]
+                for name, groups in left_right_part_groups.items()
+            }
+        return parts
 
     def _protocol_classes(
         self,
@@ -61,6 +74,7 @@ class ConsistencyRunInput(MetricRunInput):
         valid_part_ids: Sequence[int],
         observation_columns: Sequence[str],
         excluded_evaluation_class_ids: Sequence[int],
+        left_right_part_groups: Optional[Mapping[str, Sequence[Mapping[str, object]]]] = None,
     ) -> Dict[str, object]:
         classes = self._protocol_classes(
             semantic_id_to_evaluation_id,
@@ -72,7 +86,7 @@ class ConsistencyRunInput(MetricRunInput):
         return {
             "metric": "consistency",
             "quantile": self.quantile,
-            "parts": self._protocol_parts(valid_part_ids),
+            "parts": self._protocol_parts(valid_part_ids, left_right_part_groups),
             "classes": classes,
             "consistency": {
                 "threshold": self.threshold,
@@ -94,11 +108,12 @@ class StabilityRunInput(MetricRunInput):
         evaluation_class_id_to_label: Mapping[str, str],
         valid_part_ids: Sequence[int],
         observation_columns: Sequence[str],
+        left_right_part_groups: Optional[Mapping[str, Sequence[Mapping[str, object]]]] = None,
     ) -> Dict[str, object]:
         return {
             "metric": "stability",
             "quantile": self.quantile,
-            "parts": self._protocol_parts(valid_part_ids),
+            "parts": self._protocol_parts(valid_part_ids, left_right_part_groups),
             "classes": self._protocol_classes(
                 semantic_id_to_evaluation_id,
                 evaluation_class_id_to_label,

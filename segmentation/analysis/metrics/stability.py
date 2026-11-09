@@ -29,6 +29,7 @@ from segmentation.constants import (
 )
 from segmentation.data.dataset import PatchClassificationDataset
 from segmentation.data.cityscapes_parts import filter_official_parts
+from segmentation.data.pascal_parts import left_right_part_groups, merge_left_right_presence
 from segmentation.model.model import PPNet
 from segmentation.model.model_multiscale_group import PPNetMultiScale
 from settings import log
@@ -118,11 +119,14 @@ def run_stability(run_input: StabilityRunInput):
     require_semantic_match = run_input.require_semantic_match
     seed = run_input.seed
     exclude_background_centroid = run_input.exclude_background_centroid
+    merge_left_right_parts = run_input.merge_left_right_parts
 
     if official_parts_only and data_type != "cityscapes":
         raise ValueError("official_parts_only is supported only for cityscapes")
     if require_semantic_match and data_type != "pascal":
         raise ValueError("require_semantic_match is supported only for pascal")
+    if merge_left_right_parts and data_type != "pascal":
+        raise ValueError("merge_left_right_parts is supported only for pascal")
 
     model_path = os.path.join(os.environ["RESULTS_DIR"], model_name)
 
@@ -172,6 +176,7 @@ def run_stability(run_input: StabilityRunInput):
             [f"part_{part_id}" for part_id in range(MAX_PARTS + 1)]
             + [f"noisy_part_{part_id}" for part_id in range(MAX_PARTS + 1)]
         ),
+        left_right_part_groups=left_right_part_groups() if merge_left_right_parts else None,
     )
     output = MetricOutput(
         "stability", checkpoint_path, data_type, model_name=model_name,
@@ -180,6 +185,7 @@ def run_stability(run_input: StabilityRunInput):
         official_parts_only=official_parts_only,
         require_semantic_match=require_semantic_match,
         exclude_background_centroid=exclude_background_centroid,
+        merge_left_right_parts=merge_left_right_parts,
     )
     try:
         torch.manual_seed(seed)
@@ -188,6 +194,7 @@ def run_stability(run_input: StabilityRunInput):
         log(f"Part labels: {'official Cityscapes parts only' if official_parts_only else 'all decoded part IDs'}")
         if data_type == "pascal":
             log(f"Pascal semantic agreement: {'required' if require_semantic_match else 'not required (legacy)'}")
+            log(f"Left/right parts: {'merged with per-image OR' if merge_left_right_parts else 'separate'}")
         log(f"Part centroids: {'foreground only' if exclude_background_centroid else 'including background (legacy)'}")
         ppnet = load_model_checkpoint(checkpoint_path)
         ppnet = ppnet.cuda()
@@ -259,10 +266,12 @@ def run_stability(run_input: StabilityRunInput):
             _, part_presence_list = part_intersect(
                 img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile, proto_ids,
                 exclude_background_centroid=exclude_background_centroid,
+                merge_left_right_parts=merge_left_right_parts,
             )
             _, noise_part_presence_list = part_intersect(
                 img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile, proto_ids, std_dev,
                 exclude_background_centroid=exclude_background_centroid,
+                merge_left_right_parts=merge_left_right_parts,
             )
 
             paired = _paired_rows(part_presence_list, noise_part_presence_list, MAX_PARTS)
@@ -307,6 +316,7 @@ def part_intersect(
     filter_class_ids: List[int] = [],
     *,
     exclude_background_centroid: bool = False,
+    merge_left_right_parts: bool = False,
 ) -> Tuple[Dict[int, List[int]], List[List[Any]]]:
     """Compute intersection between part labels and prototype activations."""
 
@@ -376,7 +386,15 @@ def part_intersect(
                     for centroid in centroids:
                         x, y = centroid[0], centroid[1]
                         presence_list[part_id] += upsampled_act_img_j[y, x, 0]
-                part_presence[p.item()] = [0 if val == 0 else 1 for val in presence_list]
+                hits = [0 if val == 0 else 1 for val in presence_list]
+                if merge_left_right_parts:
+                    # Keep the stability vector binary: redundant right-hand columns
+                    # are zero in both passes, so they cannot introduce NaN != NaN.
+                    hits = [
+                        0 if np.isnan(hit) else hit
+                        for hit in merge_left_right_presence(hits, cls2name[class_id - 1])
+                    ]
+                part_presence[p.item()] = hits
                 part_presence_list.append(part_presence[p.item()] + [p.item(), cls2name[class_id - 1], img_id])
 
     return part_presence, part_presence_list

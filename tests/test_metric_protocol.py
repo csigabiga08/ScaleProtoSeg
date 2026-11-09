@@ -6,6 +6,7 @@ from segmentation.analysis.metrics.protocol import (
     ConsistencyRunInput,
     StabilityRunInput,
 )
+from segmentation.data.pascal_parts import left_right_part_groups
 
 
 class MetricRunInputTests(unittest.TestCase):
@@ -21,6 +22,7 @@ class MetricRunInputTests(unittest.TestCase):
         self.assertFalse(run.official_parts_only)
         self.assertFalse(run.require_semantic_match)
         self.assertFalse(run.exclude_background_centroid)
+        self.assertFalse(run.merge_left_right_parts)
         protocol = run.to_protocol(
             semantic_id_to_evaluation_id={1: 2},
             evaluation_class_id_to_label={"2": "cat"},
@@ -36,6 +38,7 @@ class MetricRunInputTests(unittest.TestCase):
                 "official_parts_only": False,
                 "require_semantic_match": False,
                 "exclude_background_centroid": False,
+                "merge_left_right_parts": False,
             },
             "classes": {
                 "semantic_id_to_evaluation_id": {1: 2},
@@ -78,6 +81,7 @@ class MetricRunInputTests(unittest.TestCase):
         self.assertFalse(run.official_parts_only)
         self.assertFalse(run.require_semantic_match)
         self.assertFalse(run.exclude_background_centroid)
+        self.assertFalse(run.merge_left_right_parts)
         protocol = run.to_protocol(
             semantic_id_to_evaluation_id={7: 4},
             evaluation_class_id_to_label={"4": "car"},
@@ -87,6 +91,7 @@ class MetricRunInputTests(unittest.TestCase):
         self.assertEqual(protocol["metric"], "stability")
         self.assertEqual(protocol["quantile"], 0.8)
         self.assertEqual(protocol["parts"]["valid_part_ids"], [5, 2])
+        self.assertFalse(protocol["parts"]["merge_left_right_parts"])
         self.assertEqual(protocol["classes"]["background_evaluation_class_id"], None)
         self.assertNotIn("excluded_evaluation_class_ids", protocol["classes"])
         self.assertEqual(protocol["stability"], {
@@ -132,6 +137,47 @@ class MetricRunInputTests(unittest.TestCase):
                         data_type="cityscapes",
                         require_semantic_match=True,
                     )
+            with self.subTest(model=model.__name__, flag="merge_left_right_parts"):
+                with self.assertRaises(ValidationError):
+                    model(
+                        **common,
+                        data_type="cityscapes",
+                        merge_left_right_parts=True,
+                    )
+
+    def test_merged_part_groups_are_recorded_in_protocol(self):
+        run = ConsistencyRunInput(
+            model_name="model",
+            training_phase="push",
+            data_type="pascal",
+            merge_left_right_parts=True,
+        )
+        protocol = run.to_protocol(
+            semantic_id_to_evaluation_id={1: 2},
+            evaluation_class_id_to_label={"2": "person"},
+            valid_part_ids=[1, 2],
+            observation_columns=["part_0", "part_1"],
+            excluded_evaluation_class_ids=[],
+            left_right_part_groups=left_right_part_groups(),
+        )
+
+        self.assertTrue(protocol["parts"]["merge_left_right_parts"])
+        self.assertEqual(
+            protocol["parts"]["left_right_part_groups"]["person"][3],
+            {
+                "canonical_part_id": 13,
+                "source_part_ids": [13, 16],
+                "source_labels": ["llarm", "rlarm"],
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "canonical group definitions"):
+            run.to_protocol(
+                semantic_id_to_evaluation_id={1: 2},
+                evaluation_class_id_to_label={"2": "person"},
+                valid_part_ids=[1, 2],
+                observation_columns=["part_0", "part_1"],
+                excluded_evaluation_class_ids=[],
+            )
 
     def test_protocol_excludes_operational_model_and_checkpoint_values(self):
         run = ConsistencyRunInput(
@@ -152,6 +198,7 @@ class MetricRunInputTests(unittest.TestCase):
         )
 
         self.assertEqual(protocol["parts"]["valid_part_ids"], [4, 1])
+        self.assertFalse(protocol["parts"]["merge_left_right_parts"])
         self.assertEqual(protocol["classes"]["excluded_evaluation_class_ids"], [])
         serialized = repr(protocol)
         for operational_value in (

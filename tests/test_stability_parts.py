@@ -57,6 +57,7 @@ class StabilityPartsTests(unittest.TestCase):
                 "official_parts_only": False,
                 "require_semantic_match": True,
                 "exclude_background_centroid": True,
+                "merge_left_right_parts": False,
             },
             "classes": {
                 "semantic_id_to_evaluation_id": {1: 2, 2: 3},
@@ -88,6 +89,7 @@ class StabilityPartsTests(unittest.TestCase):
                     "data_type=pascal",
                     "std_dev=0.35",
                     "seed=41",
+                    "merge_left_right_parts=true",
                 ],
             )
             with patch.object(stability, "run_stability") as runner:
@@ -100,6 +102,7 @@ class StabilityPartsTests(unittest.TestCase):
         self.assertEqual(run_input.data_type, "pascal")
         self.assertEqual(run_input.std_dev, 0.35)
         self.assertEqual(run_input.seed, 41)
+        self.assertTrue(run_input.merge_left_right_parts)
 
     def test_stability_hydra_config_defaults_seed_and_rejects_unknown_fields(self):
         config_dir = Path(__file__).resolve().parents[1] / "config" / "hydra" / "metrics"
@@ -115,6 +118,7 @@ class StabilityPartsTests(unittest.TestCase):
             with patch.object(stability, "run_stability") as runner:
                 stability._run_config(config)
             self.assertEqual(runner.call_args.args[0].seed, 0)
+            self.assertFalse(runner.call_args.args[0].merge_left_right_parts)
 
             with self.assertRaises(ConfigCompositionException):
                 compose(
@@ -198,6 +202,33 @@ class StabilityPartsTests(unittest.TestCase):
                     self.assertEqual(legacy[0][1], 1)
                     self.assertEqual(foreground[0][1], 0)
 
+    def test_left_right_hits_are_merged_before_stability_comparison(self):
+        image = Image.new("RGB", (5, 5))
+        semantic = np.full((5, 5), 2, dtype=np.int64)
+        parts = np.zeros((5, 5), dtype=np.int64)
+        parts[0, 0] = 16
+        distances = torch.full((1, 1, 5, 5), 10.0)
+        distances[0, 0, 0, 0] = 0.1
+        model = MagicMock()
+        model.epsilon = 1e-4
+        model.prototype_class_identity = torch.zeros((1, 21))
+        model.prototype_class_identity[0, 1] = 1
+        model.forward_from_conv_features.return_value = (None, distances)
+
+        with (
+            patch.object(stability, "to_normalized_tensor", return_value=torch.zeros((3, 5, 5))),
+            patch.object(torch.Tensor, "cuda", lambda self: self),
+            patch.object(stability, "MAX_PARTS", 24, create=True),
+        ):
+            _, rows = stability.part_intersect(
+                image, semantic, parts, model, {1: "person"}, "sample", 0.8,
+                exclude_background_centroid=True,
+                merge_left_right_parts=True,
+            )
+
+        self.assertEqual(rows[0][13], 1)
+        self.assertEqual(rows[0][16], 0)
+
     def test_pairing_rejects_duplicate_and_unmatched_rows(self):
         row = [0] * (stability.MAX_PARTS_PASCAL + 1) + [2, "aeroplane", "sample"]
         with self.assertRaisesRegex(ValueError, "unique"):
@@ -265,6 +296,19 @@ class StabilityPartsTests(unittest.TestCase):
                 self.assertNotEqual(foreground_bundle, legacy_bundle)
                 self.assertTrue(foreground_record["protocol"]["parts"]["exclude_background_centroid"])
                 self.assertEqual(foreground_record["scores"]["stability"]["value"], 1.0)
+
+                stability.run_stability(
+                    run_input.model_copy(update={"merge_left_right_parts": True})
+                )
+                self.assertEqual(intersect.call_count, 6)
+                self.assertEqual(
+                    [call.kwargs["merge_left_right_parts"] for call in intersect.call_args_list[-2:]],
+                    [True, True],
+                )
+                _, merged_record = latest_record(catalog_root)
+                self.assertTrue(merged_record["protocol"]["parts"]["merge_left_right_parts"])
+                self.assertIn("person", merged_record["protocol"]["parts"]["left_right_part_groups"])
+
                 with (foreground_bundle / "observations.csv").open(newline="") as stream:
                     columns = next(csv.reader(stream))
                 self.assertIn("part_1", columns)
