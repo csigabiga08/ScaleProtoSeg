@@ -23,38 +23,6 @@ def latest_record(root):
 
 
 class StabilityPartsTests(unittest.TestCase):
-    def test_loaded_model_protocol_records_epsilon_and_separates_noise_seed(self):
-        class DatasetReached(Exception):
-            pass
-
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
-            root = Path(temporary)
-            checkpoint = root / "model" / "checkpoints" / "push_last.pth"
-            checkpoint.parent.mkdir(parents=True)
-            checkpoint.write_bytes(b"fixture checkpoint bytes")
-            catalog_root = root / "catalog"
-            catalog_root.mkdir()
-            model = MagicMock()
-            model.cuda.return_value = model
-            model.epsilon = 0.003
-            model.prototype_activation_function = "log"
-            with (
-                patch.dict(os.environ, {
-                    "RESULTS_DIR": str(root),
-                    "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
-                }),
-                patch.object(stability, "load_model_checkpoint", return_value=model),
-                patch.object(stability, "PatchClassificationDataset", side_effect=DatasetReached),
-            ):
-                with self.assertRaises(DatasetReached):
-                    stability.run_stability("model", "push", "pascal", seed=41)
-            bundle = next((catalog_root / "measurements").iterdir())
-            result = json.loads((bundle / "result.json").read_text())
-            self.assertEqual(result["protocol"]["model"]["epsilon"], 0.003)
-            self.assertEqual(result["protocol"]["stability"]["seed"], 41)
-            self.assertEqual(result["parameters"]["seed"], 41)
-            self.assertNotIn("seed", result["model"])
-
     def test_stability_observations_use_one_based_evaluator_class_ids(self):
         import pandas as pd
 
@@ -75,7 +43,6 @@ class StabilityPartsTests(unittest.TestCase):
             quantile=0.8, std_dev=0.2, seed=41, official_parts_only=False,
             require_semantic_match=False, exclude_background_centroid=False,
         )
-        self.assertEqual(protocol["classes"]["id_convention"]["model_class_index"], "evaluation_class_id - 1")
         self.assertEqual(protocol["classes"]["evaluation_class_id_to_label"], {"2": "aeroplane"})
         self.assertEqual(protocol["stability"]["seed"], 41)
 
@@ -180,7 +147,7 @@ class StabilityPartsTests(unittest.TestCase):
                 self.assertEqual(intersect.call_args.args[8], 0.2                )
                 foreground_bundle, foreground_record = latest_record(catalog_root)
                 self.assertNotEqual(foreground_bundle, legacy_bundle)
-                self.assertTrue(foreground_record["protocol"]["centroids"]["exclude_background_centroid"])
+                self.assertTrue(foreground_record["protocol"]["parts"]["exclude_background_centroid"])
                 self.assertEqual(foreground_record["scores"]["stability"]["value"], 1.0)
                 with (foreground_bundle / "observations.csv").open(newline="") as stream:
                     columns = next(csv.reader(stream))

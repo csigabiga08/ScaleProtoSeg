@@ -68,52 +68,23 @@ def _protocol(metric, data_type, class_map, semantic_map, max_parts, *, quantile
     return {
         "metric": metric,
         "quantile": quantile,
-        "activation": {
-            "prototype_distance_activation": "log((distance + 1) / (distance + epsilon))",
-            "prototype_activation_function": "log",
-            "normalization_mean": [0.485, 0.456, 0.406],
-            "normalization_std": [0.229, 0.224, 0.225],
-            "resize_interpolation": "cv2.INTER_NEAREST",
-            "quantile_support": "pixels in each evaluated semantic-class mask",
-            "quantile_interpolation": "torch.quantile linear",
-            "active_comparison": "activation strictly greater than quantile",
-            "quantile_class_mask": "semantic class mask",
-        },
-        "centroids": {
-            "component_rule": "OpenCV 8-connected components, rounded centroids",
-            "background_component_centroid_included": not exclude_background_centroid,
-            "exclude_background_centroid": exclude_background_centroid,
-        },
         "parts": {
             "valid_part_ids": list(range(1, max_parts + 1)),
-            "maximum_part_id": max_parts,
-            "part_mapping_identity": f"{data_type} preprocessed part annotation",
-            "annotation_provenance": "unknown",
             "official_parts_only": official_parts_only,
             "require_semantic_match": require_semantic_match,
-            "missing_part_annotation": "candidate excluded before processing",
+            "exclude_background_centroid": exclude_background_centroid,
         },
-        "model": {"epsilon": None, "prototype_activation_function": None},
         "classes": {
             "semantic_id_to_evaluation_id": semantic_map,
-            "id_convention": {
-                "semantic_mapping_input_ids": "source annotation IDs before dataset.convert_targets",
-                "semantic_mapping_output_ids": "one-based evaluator IDs; zero is ignored/void",
-                "model_class_index": "evaluation_class_id - 1",
-            },
             "evaluation_class_id_to_label": {str(key + 1): value for key, value in class_map.items()},
-            "ignored_or_void_evaluation_class_id": 0,
             "background_evaluation_class_id": 1 if data_type == "pascal" else None,
             "excluded_evaluation_class_ids": list(PASCAL_FILTER_CLASS) if data_type == "pascal" else [],
         },
         "consistency": {
             "threshold": threshold,
-            "strict_comparison": "mean part presence > threshold",
-            "prototype_class_consistent": "any part flag is one",
             "aggregation": "unweighted mean over class/prototype rows",
         },
         "observation_columns": [f"part_{part_id}" for part_id in range(max_parts + 1)],
-        "unavailable_part_value": "blank",
     }
 
 
@@ -260,11 +231,6 @@ def run_consistency(
         selected_ids = _selected_prototypes(ppnet, proto_ids, FILTER_CLASS)
         output.set_selected_prototype_ids(selected_ids)
         output.update_model_metadata(architecture=type(ppnet).__name__)
-        output.record_model_runtime(
-            ppnet,
-            grouping_active=proto_ids is not None,
-            excluded_evaluation_class_ids=FILTER_CLASS,
-        )
 
         val_dataset = PatchClassificationDataset(  # TODO: Adapt to new dataset
             data_type=data_type,

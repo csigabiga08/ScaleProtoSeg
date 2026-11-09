@@ -2,7 +2,6 @@
 
 import json
 import os
-import csv
 from pathlib import Path
 import tempfile
 import unittest
@@ -57,7 +56,6 @@ class ConsistencyPartsTests(unittest.TestCase):
             max_parts, quantile=0.8, threshold=0.8, official_parts_only=False,
             require_semantic_match=False, exclude_background_centroid=False,
         )
-        self.assertEqual(protocol["classes"]["id_convention"]["model_class_index"], "evaluation_class_id - 1")
         self.assertEqual(protocol["classes"]["evaluation_class_id_to_label"], {"2": "aeroplane"})
         self.assertEqual(protocol["classes"]["background_evaluation_class_id"], 1)
         self.assertIn(1, protocol["classes"]["excluded_evaluation_class_ids"])
@@ -100,7 +98,6 @@ class ConsistencyPartsTests(unittest.TestCase):
                 np.testing.assert_array_equal(intersect.call_args.args[2], original_parts)
                 unfiltered_bundle, unfiltered = latest_record(catalog_root)
                 self.assertEqual(unfiltered["status"], "complete")
-                self.assertEqual(unfiltered["protocol"]["parts"]["annotation_provenance"], "unknown")
                 unfiltered_score = unfiltered["scores"]["consistency"]["value"]
 
                 with self.assertRaises(FileNotFoundError):
@@ -188,7 +185,7 @@ class ConsistencyPartsTests(unittest.TestCase):
                 )
                 self.assertTrue(intersect.call_args.kwargs["exclude_background_centroid"])
                 _, foreground_record = latest_record(catalog_root)
-                self.assertTrue(foreground_record["protocol"]["centroids"]["exclude_background_centroid"])
+                self.assertTrue(foreground_record["protocol"]["parts"]["exclude_background_centroid"])
 
                 # Reject shapes which NumPy would otherwise silently broadcast.
                 np.save(native_dir / "sample.npy", [[15]])

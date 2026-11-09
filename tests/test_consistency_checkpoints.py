@@ -19,37 +19,6 @@ class DatasetReached(Exception):
 
 
 class ConsistencyCheckpointTests(unittest.TestCase):
-    def test_loaded_model_protocol_records_actual_model_and_input_rules(self):
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
-            root = Path(temporary)
-            checkpoint = root / "model" / "checkpoints" / "push_last.pth"
-            checkpoint.parent.mkdir(parents=True)
-            checkpoint.write_bytes(b"fixture checkpoint bytes")
-            catalog_root = root / "catalog"
-            catalog_root.mkdir()
-            model = MagicMock()
-            model.cuda.return_value = model
-            model.epsilon = 0.0007
-            model.prototype_activation_function = "linear"
-            with (
-                patch.dict(os.environ, {
-                    "RESULTS_DIR": str(root),
-                    "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
-                }),
-                patch.object(consistency, "load_model_checkpoint", return_value=model),
-                patch.object(consistency, "PatchClassificationDataset", side_effect=DatasetReached),
-            ):
-                with self.assertRaises(DatasetReached):
-                    consistency.run_consistency("model", "push", "pascal")
-            bundle = next((catalog_root / "measurements").iterdir())
-            result = json.loads((bundle / "result.json").read_text())
-            self.assertEqual(result["protocol"]["model"]["epsilon"], 0.0007)
-            self.assertEqual(result["protocol"]["model"]["prototype_activation_function"], "linear")
-            self.assertIn("native cached image resolution", result["protocol"]["input"]["resolution"])
-            self.assertIn("group_projection", result["protocol"]["prototype_selection"]["group_nonzero_rule"])
-            self.assertEqual(result["protocol"]["prototype_selection"]["excluded_evaluation_class_ids"], [1, 5, 10, 12, 19])
-            self.assertNotIn("seed", result["model"])
-
     def test_catalog_root_is_validated_before_model_loading(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
             root = Path(temporary)

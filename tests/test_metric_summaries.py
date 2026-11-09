@@ -11,7 +11,6 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-import warnings
 
 from segmentation.analysis.metrics import catalog_cli, summaries
 from segmentation.analysis.metrics.catalog import CatalogError, load_observations

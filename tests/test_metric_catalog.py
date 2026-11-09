@@ -11,7 +11,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from segmentation.analysis.metrics.catalog import (
     CatalogError,
@@ -223,25 +223,6 @@ class MetricCatalogTests(unittest.TestCase):
             output = self.make_output()
             output.record_dataset(dataset)
             self.assertEqual(output.result["dataset"]["candidate_count"], 2)
-
-    def test_loaded_model_runtime_is_added_to_protocol_not_model_seed(self):
-        model = type("Model", (), {"epsilon": 0.0007, "prototype_activation_function": "linear"})()
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output(seed=41)
-            output.record_model_runtime(model, grouping_active=True, excluded_evaluation_class_ids=[1, 5])
-            protocol = output.result["protocol"]
-            self.assertEqual(protocol["model"]["epsilon"], 0.0007)
-            self.assertEqual(protocol["model"]["prototype_activation_function"], "linear")
-            self.assertTrue(protocol["prototype_selection"]["grouping_active"])
-            self.assertNotIn("seed", output.result["model"])
-            self.assertEqual(output.result["parameters"]["seed"], 41)
-
-    def test_non_scalar_runtime_model_attributes_are_recorded_as_null(self):
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
-            output.record_model_runtime(MagicMock(), grouping_active=False, excluded_evaluation_class_ids=[])
-        self.assertIsNone(output.result["protocol"]["model"]["epsilon"])
-        self.assertIsNone(output.result["protocol"]["model"]["prototype_activation_function"])
 
     def test_discovery_yields_only_validated_uuid_records(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):

@@ -59,16 +59,6 @@ def _json_value(value):
     return str(value)
 
 
-def _scalar(value):
-    if type(value).__module__.split(".", 1)[0] in ("numpy", "torch"):
-        item = getattr(value, "item", None)
-        try:
-            value = item() if callable(item) else None
-        except (TypeError, ValueError, RuntimeError):
-            value = None
-    return value
-
-
 class MetricOutput:
     """Write one immutable measurement under the configured catalog root."""
 
@@ -186,46 +176,6 @@ class MetricOutput:
         self._ensure_running()
         self.result["model"].update(_json_value(fields))
         self._write_result()
-
-    def update_protocol(self, **fields):
-        self._ensure_running()
-        self.result["protocol"].update(_json_value(fields))
-        self._write_result()
-
-    def record_model_runtime(self, model, *, grouping_active, excluded_evaluation_class_ids):
-        epsilon = _scalar(getattr(model, "epsilon", None))
-        activation = getattr(model, "prototype_activation_function", None)
-        self.update_protocol(
-            model={
-                "epsilon": float(epsilon) if isinstance(epsilon, (int, float)) else None,
-                "prototype_activation_function": activation if isinstance(activation, str) else None,
-            },
-            input={
-                "source": "cached validation image opened by get_img_path and converted to RGB",
-                "resolution": "native cached image resolution; no metric resize before feature extraction",
-                "normalization": {
-                    "conversion": "PIL RGB uint8 to tensor in [0, 1]",
-                    "mean": [0.485, 0.456, 0.406],
-                    "std": [0.229, 0.224, 0.225],
-                },
-            },
-            prototype_selection={
-                "class_identity_rule": (
-                    "select nonzero prototype_class_identity entries at model class index "
-                    "evaluation_class_id - 1"
-                ),
-                "excluded_evaluation_class_ids": list(excluded_evaluation_class_ids),
-                "grouping_active": bool(grouping_active),
-                "group_nonzero_rule": (
-                    "torch.nonzero(group_projection[class].weight.data.sum(dim=0)); "
-                    "map selected positions through nonzero prototype_class_identity[:, class]"
-                ),
-                "group_intersection_rule": (
-                    "retain model prototype IDs selected by the grouping checkpoint"
-                    if grouping_active else "no grouping-checkpoint filter"
-                ),
-            },
-        )
 
     def set_selected_prototype_ids(self, prototype_ids):
         self.update_metadata(selected_prototype_ids=list(dict.fromkeys(int(value) for value in prototype_ids)))
