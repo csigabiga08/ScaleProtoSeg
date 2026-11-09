@@ -57,15 +57,11 @@ def _checkpoint_terms(record):
     ).lower()
 
 
-def _matches(record, *, metric=None, dataset=None, quantile=None, origin=None, statuses=None,
-             checkpoint=None, provenance_gap=None, variants=()):
+def _matches(record, *, metric=None, dataset=None, quantile=None, statuses=None,
+             checkpoint=None, variants=()):
     if metric and record.get("metric") != metric:
         return False
-    if dataset:
-        dataset_name = _get_path(record, "dataset.name") or _get_path(record, "dataset.dataset")
-        if dataset_name != dataset:
-            return False
-    if origin and record.get("origin") != origin:
+    if dataset and _get_path(record, "dataset.name") != dataset:
         return False
     if statuses and record.get("status") not in statuses:
         return False
@@ -78,11 +74,6 @@ def _matches(record, *, metric=None, dataset=None, quantile=None, origin=None, s
             return False
     if checkpoint and checkpoint.lower() not in _checkpoint_terms(record):
         return False
-    if provenance_gap:
-        quality = record.get("provenance_quality", {})
-        gaps = quality.get("missing_fields", []) + quality.get("warnings", [])
-        if not any(provenance_gap.lower() in str(gap).lower() for gap in gaps):
-            return False
     for expression in variants:
         if "=" not in expression:
             raise CatalogError(f"Variant filter must be dotted.path=value: {expression!r}")
@@ -96,7 +87,7 @@ def _matches(record, *, metric=None, dataset=None, quantile=None, origin=None, s
 
 
 def find_records(root=None, *, all_status=False, statuses=None, metric=None, dataset=None, quantile=None,
-                 origin=None, checkpoint=None, provenance_gap=None, variants=()):
+                 checkpoint=None, variants=()):
     """Read and filter only result.json files; do not open table/checkpoint payloads."""
     root = Path(root) if root is not None else configured_catalog_root()
     measurements = root / "measurements"
@@ -117,9 +108,8 @@ def find_records(root=None, *, all_status=False, statuses=None, metric=None, dat
             print(f"warning: skipping {bundle.name}: {error}", file=sys.stderr)
             continue
         if _matches(
-            record, metric=metric, dataset=dataset, quantile=quantile, origin=origin,
-            statuses=selected_statuses, checkpoint=checkpoint, provenance_gap=provenance_gap,
-            variants=variants,
+            record, metric=metric, dataset=dataset, quantile=quantile,
+            statuses=selected_statuses, checkpoint=checkpoint, variants=variants,
         ):
             records.append(record)
     return records
@@ -161,61 +151,23 @@ def export_records(records, output, root=None):
     output.parent.mkdir(parents=True, exist_ok=True)
     records = list(records)
     flattened = [_flatten(record) for record in records]
-    keys = sorted({key for row in flattened for key in row} | {"metadata_json"})
+    keys = sorted({key for row in flattened for key in row})
     try:
         with output.open("x", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=keys)
             writer.writeheader()
-            for record, row in zip(records, flattened):
-                row["metadata_json"] = json.dumps(record, ensure_ascii=False, sort_keys=True)
-                writer.writerow(row)
+            writer.writerows(flattened)
     except FileExistsError as error:
         raise CatalogError(f"Derived export file already exists: {output}") from error
     return output
 
 
-def read_observations(bundle, result):
-    """Read observation rows only for explicit aggregation/plot operations."""
-    _fresh_result, rows = load_observations(bundle)
-    return rows
-
-
 def validate_measurement(bundle):
-    """Validate native bundles fully and report legacy partial-evidence limitations."""
-    bundle = Path(bundle)
-    result = load_measurement(bundle)
-    if result.get("origin") == "legacy":
-        needs = list(result.get("provenance_quality", {}).get("missing_fields", []))
-        artifacts = result.get("artifacts", {})
-        for role, artifact in artifacts.items():
-            if artifact.get("bytes") is None or artifact.get("sha256") is None:
-                needs.append(f"artifact integrity metadata is incomplete: {role}")
-        coverage = result.get("dataset", {}).get("identity_coverage", {})
-        membership_complete = (
-            isinstance(coverage, dict) and coverage.get("candidate_membership") == "complete"
-        )
-        if "samples" not in artifacts or not membership_complete:
-            needs.append("candidate membership/order is unknown")
-        if any("candidate membership/order" in str(item).lower() for item in needs):
-            needs.append("candidate membership/order is unknown")
-        needs = list(dict.fromkeys(needs))
-        return {
-            "measurement_id": result["measurement_id"],
-            "status": "needs-attention" if needs else "valid",
-            "origin": "legacy",
-            "needs": needs,
-            "diagnostics": [
-                "Legacy metadata is intentionally not promoted to native completeness.",
-                "Partial sample rows are validated but are not reconciled as a complete candidate population.",
-            ],
-        }
-    return {
-        "measurement_id": result["measurement_id"],
-        "status": "valid",
-        "origin": result.get("origin", "native"),
-        "needs": [],
-        "diagnostics": [],
-    }
+    """Validate metadata, artifact integrity and observation counts; return the verdict."""
+    try:
+        return {"measurement_id": load_measurement(bundle)["measurement_id"], "status": "valid"}
+    except CatalogError as error:
+        return {"measurement_id": Path(bundle).name, "status": "invalid", "error": str(error)}
 
 
 def export_summary(result, summary, output_dir, root=None):
@@ -243,9 +195,7 @@ def _filter_arguments(parser):
     parser.add_argument("--metric")
     parser.add_argument("--dataset")
     parser.add_argument("--quantile")
-    parser.add_argument("--origin", choices=("native", "legacy"))
     parser.add_argument("--checkpoint", help="Substring of model label, checkpoint path, or SHA-256.")
-    parser.add_argument("--provenance-gap", help="Substring of a missing provenance field or warning.")
     parser.add_argument("--variant", action="append", default=[], metavar="DOTTED.PATH=VALUE")
 
 
@@ -292,9 +242,7 @@ def _filters(args):
         "metric": args.metric,
         "dataset": args.dataset,
         "quantile": args.quantile,
-        "origin": args.origin,
         "checkpoint": args.checkpoint,
-        "provenance_gap": args.provenance_gap,
         "variants": args.variant,
     }
 

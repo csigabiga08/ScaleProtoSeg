@@ -2,10 +2,7 @@
 
 import json
 
-from pydantic import ValidationError
-
 from segmentation.analysis.metrics.catalog import create_fresh_output_dir, write_derived_csv
-from segmentation.analysis.metrics.schema import ComparableProtocol, KnownIdentity, unknown_fields
 
 
 class VisualizationError(ValueError):
@@ -13,84 +10,33 @@ class VisualizationError(ValueError):
 
 
 def _known_checkpoint(record, role="prototype_checkpoint"):
-    identity = record.get("model", {}).get("inputs", {}).get(role)
-    try:
-        KnownIdentity.model_validate(identity)
-    except ValidationError as error:
+    digest = (record.get("model", {}).get("inputs", {}).get(role) or {}).get("sha256")
+    if not digest:
         raise VisualizationError(
             f"Measurement {record.get('measurement_id')} has unknown {role} identity; comparability is unverified"
-        ) from error
-    return identity["sha256"]
-
-
-def _protocol_without_quantile(record):
-    protocol = record.get("protocol")
-    if not isinstance(protocol, dict) or protocol.get("quantile") is None:
-        raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has no recorded protocol quantile"
         )
-    if protocol.get("version") not in (1, "scaleprotoseg-v1", "historical-scaleprotoseg-v1"):
-        raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has unknown protocol version; "
-            "comparability is unverified"
-        )
-    try:
-        validated = ComparableProtocol.model_validate(protocol)
-    except ValidationError as error:
-        fields = ", ".join(".".join(map(str, item["loc"])) for item in error.errors())
-        raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has incomplete protocol identity "
-            f"at {fields}; comparability is unverified"
-        ) from error
-    unknown = list(unknown_fields(validated, comparison=True))
-    if unknown:
-        raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has unknown protocol field "
-            f"{', '.join(unknown)}; comparability is unverified"
-        )
-    normalized = json.loads(json.dumps(protocol, sort_keys=True))
-    normalized.pop("quantile", None)
-    return normalized
+    return digest
 
 
 def _compatibility_signature(record):
+    """Everything that must match for runs to be plotted together, except the quantile."""
+    protocol = record.get("protocol", {})
+    if protocol.get("quantile") is None:
+        raise VisualizationError(
+            f"Measurement {record.get('measurement_id')} has no recorded protocol quantile"
+        )
     dataset = record.get("dataset", {})
-    dataset_identity = dataset.get("identity")
-    if not isinstance(dataset_identity, str) or dataset_identity.lower() in ("", "unknown", "partial", "none"):
-        raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has unknown dataset identity; comparability is unverified"
-        )
-    if (
-        not isinstance(dataset.get("name"), str)
-        or not dataset["name"].strip()
-        or dataset["name"].strip().casefold() in ("unknown", "unavailable", "partial", "null")
-        or not isinstance(dataset.get("split"), str)
-        or not dataset["split"].strip()
-        or dataset["split"].strip().casefold() in ("unknown", "unavailable", "partial", "null")
-    ):
-        raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has incomplete dataset identity"
-        )
     inputs = record.get("model", {}).get("inputs", {})
-    group = inputs.get("group_checkpoint")
-    group_digest = None if group is None else _known_checkpoint(record, "group_checkpoint")
-    parameters = record.get("parameters", {})
-    if not isinstance(parameters, dict):
-        raise VisualizationError(
-            f"Measurement {record.get('measurement_id')} has invalid expanded parameters"
-        )
-    parameters = dict(parameters)
+    parameters = dict(record.get("parameters", {}))
     parameters.pop("quantile", None)
     parameters.pop("activation_quantile", None)
-    return (
-        _known_checkpoint(record),
-        group_digest,
-        dataset.get("name"),
-        dataset.get("split"),
-        dataset_identity,
-        _protocol_without_quantile(record),
-        parameters,
-    )
+    return json.dumps({
+        "prototype_checkpoint": _known_checkpoint(record),
+        "group_checkpoint": _known_checkpoint(record, "group_checkpoint") if "group_checkpoint" in inputs else None,
+        "dataset": [dataset.get("name"), dataset.get("split")],
+        "protocol": {key: value for key, value in protocol.items() if key != "quantile"},
+        "parameters": parameters,
+    }, sort_keys=True)
 
 
 def _class_label(record, class_id):

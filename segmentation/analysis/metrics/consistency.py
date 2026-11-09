@@ -66,7 +66,6 @@ def _selected_prototypes(model, allowed_ids, filtered_classes):
 def _protocol(metric, data_type, class_map, semantic_map, max_parts, *, quantile, threshold,
               official_parts_only, require_semantic_match, exclude_background_centroid):
     return {
-        "version": 1,
         "metric": metric,
         "quantile": quantile,
         "activation": {
@@ -293,7 +292,7 @@ def run_consistency(
             path_part = str(path_cls.parent) + f"_PIDS/{path_cls.name}"
 
             if not os.path.exists(os.path.join(path_part, img_id + ".npy")):
-                output.mark_sample(img_id, "excluded", "missing_part_annotation")
+                output.mark_excluded(img_id)
                 continue
 
             output.start_sample(img_id)

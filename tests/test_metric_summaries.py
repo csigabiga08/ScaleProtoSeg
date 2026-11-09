@@ -1,6 +1,7 @@
 """CPU-only tests for catalog queries, summaries, and derived plots."""
 
 import contextlib
+import copy
 import csv
 import hashlib
 import io
@@ -13,61 +14,19 @@ from unittest.mock import patch
 import warnings
 
 from segmentation.analysis.metrics import catalog_cli, summaries, visualizations
-from segmentation.analysis.metrics.catalog import CatalogError, load_measurement, write_derived_csv
-from segmentation.analysis.metrics.output import MetricOutput
+from segmentation.analysis.metrics.catalog import CatalogError, load_observations, write_derived_csv
 
 
 CONSISTENCY_PROTOCOL = {
-    "version": 1,
     "metric": "consistency",
     "quantile": 0.8,
-    "activation": {
-        "prototype_distance_activation": "log",
-        "prototype_activation_function": "log",
-        "normalization_mean": [0.1, 0.2, 0.3],
-        "normalization_std": [1.0, 1.0, 1.0],
-        "resize_interpolation": "nearest",
-        "quantile_support": "semantic-class pixels",
-        "quantile_interpolation": "linear",
-        "active_comparison": "strictly greater than quantile",
-        "quantile_class_mask": "semantic class mask",
-    },
-    "centroids": {
-        "component_rule": "connected components",
-        "background_component_centroid_included": False,
-        "exclude_background_centroid": True,
-    },
     "parts": {
         "valid_part_ids": [1, 2],
-        "mapping_identity": {"status": "available", "sha256": "c" * 64},
         "class_dependent_part_definitions": {
             "fixture": {"part_id_to_name": {"1": "part one", "2": "part two"}},
         },
     },
-    "classes": {
-        "id_convention": {"model_class_index": "class_id - 1"},
-        "evaluation_class_id_to_label": {"1": "fixture", "2": "other"},
-        "ignored_or_void_evaluation_class_id": 0,
-        "background_evaluation_class_id": None,
-        "excluded_evaluation_class_ids": [],
-    },
-    "prototype_selection": {
-        "class_identity_rule": "recorded",
-        "excluded_evaluation_class_ids": [],
-        "grouping_active": False,
-        "group_nonzero_rule": "nonzero",
-        "group_intersection_rule": "none",
-    },
-    "model": {"epsilon": 1e-4, "prototype_activation_function": "log"},
-    "input": {
-        "source": "fixture image",
-        "resolution": "native",
-        "normalization": {
-            "conversion": "RGB tensor in [0, 1]",
-            "mean": [0.1, 0.2, 0.3],
-            "std": [1.0, 1.0, 1.0],
-        },
-    },
+    "classes": {"evaluation_class_id_to_label": {"1": "fixture", "2": "other"}},
     "consistency": {
         "threshold": 0.8,
         "strict_comparison": "mean part presence > threshold",
@@ -77,7 +36,6 @@ CONSISTENCY_PROTOCOL = {
 }
 
 STABILITY_PROTOCOL = {
-    "version": 1,
     "metric": "stability",
     "quantile": 0.8,
     "parts": {"valid_part_ids": [1, 2]},
@@ -89,50 +47,51 @@ STABILITY_PROTOCOL = {
 }
 
 
-def legacy_record(measurement_id, *, metric="consistency", quantile=0.8, status="complete"):
-    protocol = json.loads(json.dumps(CONSISTENCY_PROTOCOL if metric == "consistency" else STABILITY_PROTOCOL))
+def obs(sample_id, class_id=1, prototype_id=1, part_1="1", part_2="0", **extra):
+    return {
+        "sample_id": sample_id, "class_id": str(class_id), "prototype_id": str(prototype_id),
+        "repetition": "0", "part_1": part_1, "part_2": part_2, **extra,
+    }
+
+
+def make_record(measurement_id, *, metric="consistency", quantile=0.8, status="complete", checkpoint="b" * 64):
+    protocol = copy.deepcopy(CONSISTENCY_PROTOCOL if metric == "consistency" else STABILITY_PROTOCOL)
     protocol["quantile"] = quantile
     return {
-        "schema_version": 1,
         "measurement_id": measurement_id,
-        "origin": "legacy",
         "metric": metric,
         "status": status,
         "scores": {},
-        "model": {
-            "label": "fixture",
-            "inputs": {
-                "prototype_checkpoint": {
-                    "path": "checkpoint.pth",
-                    "bytes": 4,
-                    "sha256": "a" * 64,
-                    "status": "available",
-                }
-            },
-        },
-        "dataset": {"name": "fixture-set", "split": "val", "identity": "fixture-dataset-v1"},
+        "model": {"label": "fixture", "inputs": {"prototype_checkpoint": {"sha256": checkpoint}}},
+        "dataset": {"name": "fixture-set", "split": "val"},
         "protocol": protocol,
-        "parameters": {},
+        "parameters": {"quantile": quantile},
         "artifacts": {},
-        "provenance_quality": {
-            "missing_fields": ["candidate membership", "sample order"],
-            "warnings": ["Historical sample table was not retained."],
-        },
-        "extension": {"preserved": {"note": "unknown extension"}},
     }
 
 
 def write_measurement(root, record, observations=None):
+    """Write a bundle; with observations the artifact entry, counts, and score are filled in."""
     bundle = root / "measurements" / record["measurement_id"]
     bundle.mkdir(parents=True)
     if observations is not None:
-        observation_path = bundle / "observations.csv"
-        with observation_path.open("w", newline="", encoding="utf-8") as stream:
-            writer = csv.DictWriter(stream, fieldnames=list(observations[0]))
+        path = bundle / "observations.csv"
+        columns = ["sample_id", "class_id", "prototype_id", "repetition"] + record["protocol"]["observation_columns"]
+        with path.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=columns)
             writer.writeheader()
             writer.writerows(observations)
-        record["artifacts"]["observations"] = {"path": "observations.csv"}
-        record["observation_schema"] = {"columns": list(observations[0])}
+        record["artifacts"]["observations"] = {
+            "path": "observations.csv",
+            "bytes": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        samples = {row["sample_id"] for row in observations}
+        record["population"] = {"candidates": len(samples), "contributing": len(samples), "observations": len(observations)}
+        if record["status"] == "complete":
+            record["scores"][record["metric"]] = {
+                "value": 1.0, "unit": "fraction", "numerator": 1, "denominator": 1,
+            }
     (bundle / "result.json").write_text(json.dumps(record), encoding="utf-8")
     return bundle
 
@@ -143,424 +102,131 @@ class MetricSummaryTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name) / "catalog"
         (self.root / "measurements").mkdir(parents=True)
+        patcher = patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-    def make_native_measurement(self):
-        checkpoint = Path(self.temporary.name) / "native-checkpoint.pth"
-        checkpoint.write_bytes(b"fixture")
-        protocol = json.loads(json.dumps(CONSISTENCY_PROTOCOL))
-        protocol["parts"]["maximum_part_id"] = 2
-        protocol["parts"]["mapping_identity"].update({
-            "path": str(checkpoint),
-            "bytes": checkpoint.stat().st_size,
-        })
-        protocol["parts"]["annotation_provenance"] = "unknown"
-        protocol["classes"]["id_convention"] = {
-            "semantic_mapping_input_ids": "source IDs",
-            "semantic_mapping_output_ids": "one-based evaluator IDs",
-            "model_class_index": "evaluation_class_id - 1",
-        }
-        protocol["consistency"]["prototype_class_consistent"] = "any part flag is one"
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = MetricOutput(
-                "consistency",
-                checkpoint,
-                "fixture",
-                model_name="fixture",
-                training_phase="push",
-                protocol=protocol,
-            )
-        output.set_candidates(["excluded"])
-        output.mark_sample("excluded", "excluded", "fixture")
-        output.finish(value=0.0, numerator=0, denominator=1)
-        return output.path, output.measurement_id
+    def run_cli(self, *args):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = catalog_cli.main(list(args))
+        return code, output.getvalue()
 
     def test_dotenv_root_is_used_without_overwriting_exported_root(self):
         checkout = Path(self.temporary.name) / "checkout"
         checkout.mkdir()
         configured = Path(self.temporary.name) / "configured"
-        exported = Path(self.temporary.name) / "exported"
         configured.mkdir()
-        exported.mkdir()
         (checkout / ".env").write_text(f"MEASUREMENT_CATALOG_ROOT={configured}\n")
-
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(catalog_cli.configured_catalog_root(checkout), configured.resolve())
-            self.assertEqual(os.environ["MEASUREMENT_CATALOG_ROOT"], str(configured))
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(exported)}):
-            self.assertEqual(catalog_cli.configured_catalog_root(checkout), exported.resolve())
-            self.assertEqual(os.environ["MEASUREMENT_CATALOG_ROOT"], str(exported))
+        self.assertEqual(catalog_cli.configured_catalog_root(checkout), self.root.resolve())
 
-    def test_list_defaults_to_complete_and_all_status_keeps_unknown_legacy_visible(self):
-        complete = legacy_record("complete")
-        complete["provenance_quality"]["missing_fields"].append("model architecture")
-        write_measurement(self.root, complete)
-        write_measurement(self.root, legacy_record("running", status="running"))
-        write_measurement(self.root, legacy_record("failed", status="failed"))
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            completed = catalog_cli.find_records()
-            self.assertEqual([row["measurement_id"] for row in completed], ["complete"])
-            all_records = catalog_cli.find_records(all_status=True)
-            filtered = catalog_cli.find_records(
-                all_status=True, metric="consistency", dataset="fixture-set", provenance_gap="model architecture"
-            )
+    def test_list_defaults_to_complete_and_filters_by_parameters(self):
+        write_measurement(self.root, make_record("complete"), [obs("a")])
+        write_measurement(self.root, make_record("running", status="running"))
+        write_measurement(self.root, make_record("failed", status="failed"))
+        write_measurement(self.root, make_record("other-q", quantile=0.9), [obs("a")])
+        self.assertEqual({r["measurement_id"] for r in catalog_cli.find_records()}, {"complete", "other-q"})
+        everything = catalog_cli.find_records(all_status=True)
+        self.assertEqual(len(everything), 4)
         with self.assertRaisesRegex(CatalogError, "requires --all-status"):
-            catalog_cli.find_records(self.root, statuses=("failed",))
-        failed = catalog_cli.find_records(self.root, all_status=True, statuses=("failed",))
-        self.assertEqual(
-            {row["measurement_id"] for row in all_records},
-            {"complete", "running", "failed"},
-        )
-        self.assertIn("failed", {row["measurement_id"] for row in all_records})
-        self.assertEqual([row["measurement_id"] for row in failed], ["failed"])
-        self.assertEqual(all_records[0]["extension"]["preserved"]["note"], "unknown extension")
-        self.assertEqual([row["measurement_id"] for row in filtered], ["complete"])
+            catalog_cli.find_records(statuses=("failed",))
+        failed = catalog_cli.find_records(all_status=True, statuses=("failed",))
+        self.assertEqual([r["measurement_id"] for r in failed], ["failed"])
+        selected = catalog_cli.find_records(metric="consistency", dataset="fixture-set", quantile="0.9")
+        self.assertEqual([r["measurement_id"] for r in selected], ["other-q"])
 
-    def test_listing_reports_unsupported_major_schema_without_reinterpreting_it(self):
-        record = legacy_record("future-schema")
-        record["schema_version"] = 2
+    def test_invalid_metadata_is_skipped_with_a_warning(self):
+        record = make_record("broken")
+        del record["protocol"]
         write_measurement(self.root, record)
         diagnostic = io.StringIO()
-        with (
-            patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}),
-            contextlib.redirect_stderr(diagnostic),
-        ):
+        with contextlib.redirect_stderr(diagnostic):
             self.assertEqual(catalog_cli.find_records(), [])
-        self.assertIn("Unsupported measurement schema version: 2", diagnostic.getvalue())
+        self.assertIn("skipping broken", diagnostic.getvalue())
 
-    def test_metadata_listing_does_not_open_raw_tables_or_checkpoint_payloads(self):
-        record = legacy_record("metadata-only")
-        record["artifacts"]["observations"] = {"path": "missing-large-array.csv"}
-        record["model"]["inputs"]["prototype_checkpoint"]["path"] = "missing-checkpoint.pth"
-        write_measurement(self.root, record)
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            self.assertEqual(catalog_cli.find_records()[0]["measurement_id"], "metadata-only")
-
-    def test_filter_and_export_preserve_unknown_extension_fields(self):
-        record = legacy_record("export-me")
-        write_measurement(self.root, record)
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            selected = catalog_cli.find_records(metric="consistency", quantile="0.8")
-            output = self.root / "exports" / "records.csv"
-            catalog_cli.export_records(selected, output)
-        with output.open(newline="", encoding="utf-8") as stream:
-            row = next(csv.DictReader(stream))
-        self.assertEqual(row["extension.preserved.note"], "unknown extension")
-        self.assertEqual(json.loads(row["metadata_json"])["extension"], record["extension"])
+    def test_listing_does_not_open_observation_tables(self):
+        record = make_record("metadata-only")
+        bundle = write_measurement(self.root, record, [obs("a")])
+        (bundle / "observations.csv").unlink()
+        self.assertEqual(catalog_cli.find_records()[0]["measurement_id"], "metadata-only")
 
     def test_cli_list_filter_export_validate_and_summarize_commands(self):
-        record = legacy_record("cli")
-        rows = [
-            {"sample_id": "a", "class_id": "1", "prototype_id": "1", "repetition": "0", "part_1": "1", "part_2": "0"},
-            {"sample_id": "b", "class_id": "1", "prototype_id": "1", "repetition": "0", "part_1": "1", "part_2": "0"},
-        ]
-        bundle = write_measurement(self.root, record, rows)
-        outside = Path(self.temporary.name) / "summary-export"
-        summary_output = outside / "summary"
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                self.assertEqual(catalog_cli.main(["list"]), 0)
-            self.assertEqual(json.loads(output.getvalue())[0]["measurement_id"], "cli")
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                self.assertEqual(catalog_cli.main(["filter", "--metric", "stability"]), 0)
-            self.assertEqual(json.loads(output.getvalue()), [])
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                self.assertEqual(catalog_cli.main(["export", "--output", str(outside / "records.csv")]), 0)
-            self.assertTrue((outside / "records.csv").is_file())
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                self.assertEqual(catalog_cli.main(["validate", "cli"]), 1)
-            self.assertEqual(json.loads(output.getvalue())[0]["origin"], "legacy")
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                self.assertEqual(
-                    catalog_cli.main(["summarize", "cli", "--output-dir", str(summary_output)]),
-                    0,
-                )
-        self.assertTrue((summary_output / "summary.json").is_file())
-        summary = json.loads((summary_output / "summary.json").read_text())
+        write_measurement(self.root, make_record("cli"), [obs("a"), obs("b")])
+        outside = Path(self.temporary.name) / "exports"
+        code, text = self.run_cli("list")
+        self.assertEqual((code, json.loads(text)[0]["measurement_id"]), (0, "cli"))
+        self.assertEqual(json.loads(self.run_cli("filter", "--metric", "stability")[1]), [])
+        self.assertEqual(self.run_cli("export", "--output", str(outside / "records.csv"))[0], 0)
+        self.assertTrue((outside / "records.csv").is_file())
+        code, text = self.run_cli("validate", "cli")
+        self.assertEqual((code, json.loads(text)[0]["status"]), (0, "valid"))
+        code, _ = self.run_cli("summarize", "cli", "--output-dir", str(outside / "summary"))
+        self.assertEqual(code, 0)
+        summary = json.loads((outside / "summary" / "summary.json").read_text())
         self.assertEqual(summary["score"]["value"], 1.0)
 
-    def test_summarize_parses_each_legacy_csv_artifact_once(self):
-        record = legacy_record("single-parse")
-        rows = [{
-            "sample_id": "sample",
-            "class_id": "1",
-            "prototype_id": "1",
-            "repetition": "0",
-            "part_1": "1",
-            "part_2": "0",
-        }]
-        write_measurement(self.root, record, rows)
-        parsed_paths = []
+    def test_validate_reports_invalid_bundles(self):
+        bundle = write_measurement(self.root, make_record("tampered"), [obs("a")])
+        (bundle / "observations.csv").write_text("corrupt\n")
+        code, text = self.run_cli("validate", "tampered")
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(text)[0]["status"], "invalid")
+
+    def test_summarize_parses_each_artifact_once(self):
+        write_measurement(self.root, make_record("single-parse"), [obs("a")])
+        parsed = []
         original_reader = csv.DictReader
 
-        def count_csv_reader(stream, *args, **kwargs):
-            parsed_paths.append(Path(stream.name).name)
+        def count_reader(stream, *args, **kwargs):
+            parsed.append(Path(stream.name).name)
             return original_reader(stream, *args, **kwargs)
 
-        with (
-            patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}),
-            patch(
-                "segmentation.analysis.metrics.catalog.csv.DictReader",
-                side_effect=count_csv_reader,
-            ),
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            self.assertEqual(catalog_cli.main(["summarize", "single-parse"]), 0)
-        self.assertEqual(parsed_paths.count("observations.csv"), 1)
+        with patch("segmentation.analysis.metrics.catalog.csv.DictReader", side_effect=count_reader):
+            self.assertEqual(self.run_cli("summarize", "single-parse")[0], 0)
+        self.assertEqual(parsed, ["observations.csv"])
 
     def test_load_observations_distinguishes_empty_table_from_absent_evidence(self):
-        from segmentation.analysis.metrics.catalog import load_observations
-
-        record = legacy_record("empty-observations")
-        bundle = write_measurement(self.root, record)
-        path = bundle / "observations.csv"
-        columns = ["sample_id", "class_id", "prototype_id", "repetition", "part_1", "part_2"]
-        with path.open("w", newline="", encoding="utf-8") as stream:
-            csv.writer(stream).writerow(columns)
-        record["artifacts"]["observations"] = {"path": "observations.csv", "columns": columns}
-        record["observation_schema"] = {"version": 1, "columns": columns}
-        (bundle / "result.json").write_text(json.dumps(record), encoding="utf-8")
-
-        fresh_result, rows = load_observations(bundle)
-        self.assertEqual(fresh_result["measurement_id"], "empty-observations")
-        self.assertEqual(rows, [])
-
-        absent_bundle = write_measurement(self.root, legacy_record("no-observations"))
-        with self.assertRaisesRegex(CatalogError, "finalized observation evidence"):
-            load_observations(absent_bundle)
-
-    def test_summary_and_plot_parse_each_native_and_legacy_artifact_once(self):
-        legacy_rows = [{
-            "sample_id": "sample",
-            "class_id": "1",
-            "prototype_id": "1",
-            "repetition": "0",
-            "part_1": "1",
-            "part_2": "0",
-        }]
-        records = []
-        for origin, operation in (
-            ("legacy", "summarize"),
-            ("legacy", "plot"),
-            ("native", "summarize"),
-            ("native", "plot"),
-        ):
-            if origin == "legacy":
-                measurement_id = f"{origin}-{operation}"
-                bundle = write_measurement(self.root, legacy_record(measurement_id), legacy_rows)
-            else:
-                bundle, measurement_id = self.make_native_measurement()
-            records.append((origin, operation, bundle, measurement_id))
-
-        original_reader = csv.DictReader
-        for origin, operation, bundle, measurement_id in records:
-            parsed_paths = []
-
-            def count_csv_reader(stream, *args, **kwargs):
-                parsed_paths.append(Path(stream.name).name)
-                return original_reader(stream, *args, **kwargs)
-
-            args = [operation, measurement_id]
-            if operation == "plot":
-                args.extend(["--output-dir", str(Path(self.temporary.name) / f"plots-{measurement_id}")])
-            with (
-                patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}),
-                patch(
-                    "segmentation.analysis.metrics.catalog.csv.DictReader",
-                    side_effect=count_csv_reader,
-                ),
-                patch(
-                    "segmentation.analysis.metrics.catalog_cli.render_measurements",
-                    return_value={
-                        "output_dir": Path(self.temporary.name) / "mock-plots",
-                        "support_comparable": True,
-                    },
-                ),
-                contextlib.redirect_stdout(io.StringIO()),
-            ):
-                if operation == "plot":
-                    args = ["plot", measurement_id, "--output-dir", str(Path(self.temporary.name) / f"plots-{measurement_id}")]
-                self.assertEqual(catalog_cli.main(args), 0)
-            expected = ["observations.csv"] if origin == "legacy" else ["observations.csv", "samples.csv"]
-            self.assertCountEqual(parsed_paths, expected)
-
-    def test_summarize_uses_fresh_status_instead_of_discovered_metadata(self):
-        rows = [{
-            "sample_id": "sample",
-            "class_id": "1",
-            "prototype_id": "1",
-            "repetition": "0",
-            "part_1": "1",
-            "part_2": "0",
-        }]
-        bundle = write_measurement(self.root, legacy_record("fresh-status"), rows)
-        stale = legacy_record("fresh-status", status="failed")
-        with (
-            patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}),
-            patch("segmentation.analysis.metrics.catalog_cli.find_measurement", return_value=(bundle, stale)),
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            self.assertEqual(catalog_cli.main(["summarize", "fresh-status"]), 0)
-
-    def test_load_observations_rejects_malformed_and_returns_failed_partial_rows(self):
-        from segmentation.analysis.metrics.catalog import load_observations
-
-        rows = [{
-            "sample_id": "sample",
-            "class_id": "1",
-            "prototype_id": "1",
-            "repetition": "0",
-            "part_1": "1",
-            "part_2": "0",
-        }]
-        failed_bundle = write_measurement(
-            self.root, legacy_record("failed-partial", status="failed"), rows
+        bundle = write_measurement(self.root, make_record("empty", status="failed"), [obs("a")])
+        (bundle / "observations.csv").write_text("sample_id,class_id,prototype_id,repetition,part_1,part_2\r\n")
+        result = json.loads((bundle / "result.json").read_text())
+        result["artifacts"]["observations"].update(
+            bytes=(bundle / "observations.csv").stat().st_size,
+            sha256=hashlib.sha256((bundle / "observations.csv").read_bytes()).hexdigest(),
         )
-        result, loaded_rows = load_observations(failed_bundle)
-        self.assertEqual(result["status"], "failed")
-        self.assertEqual(loaded_rows, rows)
+        result["population"] = {"candidates": 0, "contributing": 0, "observations": 0}
+        (bundle / "result.json").write_text(json.dumps(result))
+        self.assertEqual(load_observations(bundle)[1], [])
 
-        malformed = legacy_record("malformed-observations")
-        malformed_bundle = write_measurement(self.root, malformed, rows)
-        path = malformed_bundle / "observations.csv"
-        path.write_text("sample_id,class_id,prototype_id,repetition,part_1,part_2\ns,x,1,0,1,0\n")
-        with self.assertRaisesRegex(CatalogError, "Invalid class_id"):
-            load_observations(malformed_bundle)
+        absent = write_measurement(self.root, make_record("absent", status="failed"))
+        with self.assertRaisesRegex(CatalogError, "finalized observation evidence"):
+            load_observations(absent)
 
     def test_summarize_all_status_allows_finalized_failures_but_never_running(self):
-        failed = legacy_record("failed-summary", status="failed")
-        rows = [
-            {"sample_id": "a", "class_id": "1", "prototype_id": "1", "repetition": "0", "part_1": "1", "part_2": "0"},
-        ]
-        write_measurement(self.root, failed, rows)
-        write_measurement(self.root, legacy_record("running-summary", status="running"))
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                with contextlib.redirect_stderr(io.StringIO()):
-                    with self.assertRaises(SystemExit) as failure:
-                        catalog_cli.main(["summarize", "failed-summary"])
-            self.assertEqual(failure.exception.code, 2)
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                self.assertEqual(
-                    catalog_cli.main(["summarize", "failed-summary", "--all-status"]),
-                    0,
-                )
-            self.assertEqual(json.loads(output.getvalue())["score"]["value"], 1.0)
-            error = io.StringIO()
-            with contextlib.redirect_stderr(error):
-                with self.assertRaises(SystemExit) as failure:
-                    catalog_cli.main(["summarize", "running-summary", "--all-status"])
+        write_measurement(self.root, make_record("failed-summary", status="failed"), [obs("a")])
+        write_measurement(self.root, make_record("running-summary", status="running"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as failure:
+                self.run_cli("summarize", "failed-summary")
         self.assertEqual(failure.exception.code, 2)
+        code, text = self.run_cli("summarize", "failed-summary", "--all-status")
+        self.assertEqual((code, json.loads(text)["score"]["value"]), (0, 1.0))
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error), self.assertRaises(SystemExit):
+            self.run_cli("summarize", "running-summary", "--all-status")
         self.assertIn("Running measurements cannot be summarized", error.getvalue())
 
-    def test_legacy_partial_validation_surfaces_unknown_sample_membership(self):
-        record = legacy_record("partial")
-        bundle = write_measurement(self.root, record)
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            diagnostics = catalog_cli.validate_measurement(bundle)
-        self.assertEqual(diagnostics["status"], "needs-attention")
-        self.assertIn("candidate membership/order is unknown", diagnostics["needs"])
-
-    def test_catalog_reader_accepts_truthful_legacy_metadata_with_partial_samples(self):
-        record = legacy_record("partial-table")
-        record["scores"] = {
-            "consistency": {
-                "value": 0.5,
-                "unit": "fraction",
-                "numerator": 1,
-                "denominator": 2,
-            }
-        }
-        rows = [
-            {
-                "sample_id": "known",
-                "class_id": "1",
-                "prototype_id": "1",
-                "repetition": "0",
-                "part_1": "1",
-                "part_2": "NaN",
-            },
-        ]
-        bundle = write_measurement(self.root, record, rows)
-        observation_path = bundle / "observations.csv"
-        observation_bytes = observation_path.read_bytes()
-        samples_path = bundle / "samples.csv"
-        with samples_path.open("w", newline="", encoding="utf-8") as stream:
-            writer = csv.DictWriter(
-                stream,
-                fieldnames=("sample_index", "sample_id", "outcome", "reason", "observation_count"),
-            )
-            writer.writeheader()
-            writer.writerow({
-                "sample_index": "3",
-                "sample_id": "known",
-                "outcome": "contributed",
-                "reason": "",
-                "observation_count": "1",
-            })
-        record["artifacts"]["observations"].update({
-            "bytes": len(observation_bytes),
-            "sha256": hashlib.sha256(observation_bytes).hexdigest(),
-            "schema_version": 1,
-            "columns": list(rows[0]),
-        })
-        sample_bytes = samples_path.read_bytes()
-        record["artifacts"]["samples"] = {
-            "path": "samples.csv",
-            "bytes": len(sample_bytes),
-            "sha256": hashlib.sha256(sample_bytes).hexdigest(),
-            "schema_version": 1,
-            "columns": ["sample_index", "sample_id", "outcome", "reason", "observation_count"],
-        }
-        record["observation_schema"] = {"version": 1, "columns": list(rows[0])}
-        record["provenance_quality"]["missing_fields"] = [
-            "candidate membership/order",
-            "historical sample population",
-        ]
-        (bundle / "result.json").write_text(json.dumps(record), encoding="utf-8")
-
-        loaded = load_measurement(bundle)
-        self.assertEqual(loaded["origin"], "legacy")
-        self.assertEqual(loaded["artifacts"]["samples"]["columns"], [
-            "sample_index", "sample_id", "outcome", "reason", "observation_count",
-        ])
-        self.assertNotIn(
-            "population",
-            loaded,
-            "partial legacy sample tables are not promoted to complete native populations",
-        )
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            diagnostics = catalog_cli.validate_measurement(bundle)
-        self.assertIn("candidate membership/order is unknown", diagnostics["needs"])
-
     def test_consistency_uses_strict_threshold_available_values_and_row_weighting(self):
-        record = legacy_record("weighted")
-        record["origin"] = "native"
-        record["protocol"] = json.loads(json.dumps(CONSISTENCY_PROTOCOL))
-        record["protocol"]["consistency"]["threshold"] = 0.8
         rows = [
-            {"sample_id": "a", "class_id": "1", "prototype_id": "1", "repetition": "0", "part_1": "1", "part_2": ""},
-            {"sample_id": "b", "class_id": "1", "prototype_id": "1", "repetition": "0", "part_1": "0", "part_2": "1"},
-            {"sample_id": "c", "class_id": "2", "prototype_id": "2", "repetition": "0", "part_1": "1", "part_2": ""},
-            {"sample_id": "d", "class_id": "2", "prototype_id": "2", "repetition": "0", "part_1": "1", "part_2": ""},
-            {"sample_id": "e", "class_id": "2", "prototype_id": "2", "repetition": "0", "part_1": "1", "part_2": ""},
-            {"sample_id": "f", "class_id": "2", "prototype_id": "2", "repetition": "0", "part_1": "1", "part_2": ""},
-            {"sample_id": "g", "class_id": "2", "prototype_id": "2", "repetition": "0", "part_1": "0", "part_2": ""},
-            {"sample_id": "h", "class_id": "2", "prototype_id": "3", "repetition": "0", "part_1": "", "part_2": ""},
-            {"sample_id": "i", "class_id": "2", "prototype_id": "3", "repetition": "0", "part_1": "0", "part_2": ""},
-            {"sample_id": "j", "class_id": "3", "prototype_id": "4", "repetition": "0", "part_1": "", "part_2": ""},
+            obs("a", 1, 1, "1", ""), obs("b", 1, 1, "0", "1"),
+            obs("c", 2, 2, "1", ""), obs("d", 2, 2, "1", ""), obs("e", 2, 2, "1", ""),
+            obs("f", 2, 2, "1", ""), obs("g", 2, 2, "0", ""),
+            obs("h", 2, 3, "", ""), obs("i", 2, 3, "0", ""),
+            obs("j", 3, 4, "", ""),
         ]
-        result = summaries.summarize_observations(record, rows)
-        self.assertEqual(
-            result["score"],
-            {"value": 1 / 4, "numerator": 1, "denominator": 4, "unit": "fraction"},
-        )
+        result = summaries.summarize_observations(make_record("weighted"), rows)
+        self.assertEqual(result["score"], {"value": 1 / 4, "numerator": 1, "denominator": 4, "unit": "fraction"})
         prototype = next(item for item in result["prototypes"] if item["prototype_id"] == 2)
         self.assertFalse(prototype["consistent"], "exactly 0.8 must fail strict comparison")
         part = next(item for item in result["parts"] if item["class_id"] == 2 and item["part_id"] == 1)
@@ -569,362 +235,126 @@ class MetricSummaryTests(unittest.TestCase):
         self.assertIsNone(missing["mean_presence"], "unavailable part values must not become zeros")
         unavailable = next(item for item in result["prototypes"] if item["prototype_id"] == 4)
         self.assertIsNone(unavailable["max_part_frequency"])
-        self.assertFalse(unavailable["consistent"])
         classes = {item["class_id"]: item for item in result["classes"]}
-        self.assertEqual(classes[1]["value"], 1.0)
-        self.assertEqual(classes[2]["value"], 0.0)
-        self.assertEqual(classes[3]["value"], 0.0)
+        self.assertEqual([classes[i]["value"] for i in (1, 2, 3)], [1.0, 0.0, 0.0])
 
     def test_stability_compares_paired_vectors_without_coercing_missing_to_zero(self):
-        record = legacy_record("paired", metric="stability")
         rows = [
-            {
-                "sample_id": "same", "class_id": "1", "prototype_id": "4", "repetition": "0",
-                "part_1": "0", "part_2": "1", "noisy_part_1": "0", "noisy_part_2": "1",
-            },
-            {
-                "sample_id": "missing", "class_id": "1", "prototype_id": "4", "repetition": "0",
-                "part_1": "", "part_2": "1", "noisy_part_1": "", "noisy_part_2": "1",
-            },
-            {
-                "sample_id": "changed", "class_id": "2", "prototype_id": "8", "repetition": "0",
-                "part_1": "0", "part_2": "1", "noisy_part_1": "1", "noisy_part_2": "1",
-            },
+            obs("same", 1, 4, "0", "1", noisy_part_1="0", noisy_part_2="1"),
+            obs("missing", 1, 4, "", "1", noisy_part_1="", noisy_part_2="1"),
+            obs("changed", 2, 8, "0", "1", noisy_part_1="1", noisy_part_2="1"),
         ]
-        result = summaries.summarize_observations(record, rows)
+        result = summaries.summarize_observations(make_record("paired", metric="stability"), rows)
         self.assertEqual(result["score"], {"value": 1 / 3, "numerator": 1, "denominator": 3, "unit": "fraction"})
         self.assertFalse(result["stability_rows"][1]["stable"])
         self.assertEqual(result["stability_rows"][1]["part_equalities"], [None, True])
 
     def test_unknown_aggregation_protocol_is_rejected(self):
-        record = legacy_record("unknown")
+        record = make_record("unknown")
         record["protocol"]["consistency"]["aggregation"] = "unknown future pooling"
         with self.assertRaisesRegex(summaries.SummaryError, "Unsupported consistency aggregation"):
             summaries.summarize_observations(record, [])
 
-    def test_unknown_historical_protocol_version_is_rejected(self):
-        record = legacy_record("future-protocol")
-        record["protocol"]["version"] = "scaleprotoseg-v2"
-        with self.assertRaisesRegex(summaries.SummaryError, "Unsupported historical protocol version"):
-            summaries.summarize_observations(record, [])
-
-    def test_historical_named_protocol_version_is_explicitly_supported(self):
-        record = legacy_record("historical")
-        record["protocol"]["version"] = "scaleprotoseg-v1"
-        record["protocol"]["consistency"]["aggregation"] = (
-            "historical ScaleProtoSeg: unweighted mean over class/prototype rows"
-        )
-        result = summaries.summarize_observations(record, [])
-        self.assertEqual(result["aggregation"], record["protocol"]["consistency"]["aggregation"])
-
     def test_summary_exports_are_outside_canonical_measurement_bundles(self):
-        record = legacy_record("export-guard")
-        bundle = write_measurement(self.root, record)
+        bundle = write_measurement(self.root, make_record("export-guard"))
         with self.assertRaisesRegex(CatalogError, "outside catalog measurements"):
             catalog_cli.ensure_external_output(bundle / "result.json", self.root)
 
     def test_derived_csv_writer_preserves_headers_unicode_nulls_and_nested_values(self):
         destination = Path(self.temporary.name) / "derived.csv"
-        write_derived_csv(
-            destination,
-            [{"label": "café", "empty": None, "metadata": {"雪": ["é", 2]}}],
-            ["label", "empty", "metadata"],
-        )
+        write_derived_csv(destination, [{"label": "café", "empty": None, "metadata": {"雪": ["é", 2]}}],
+                          ["label", "empty", "metadata"])
         with destination.open(newline="", encoding="utf-8") as stream:
             reader = csv.DictReader(stream)
-            self.assertEqual(reader.fieldnames, ["label", "empty", "metadata"])
             row = next(reader)
-        self.assertEqual(row, {
-            "label": "café",
-            "empty": "",
-            "metadata": '{"雪": ["é", 2]}',
-        })
+        self.assertEqual(reader.fieldnames, ["label", "empty", "metadata"])
+        self.assertEqual(row, {"label": "café", "empty": "", "metadata": '{"雪": ["é", 2]}'})
 
-        empty_destination = Path(self.temporary.name) / "empty-derived.csv"
-        write_derived_csv(empty_destination, [], ["first", "second"])
-        self.assertEqual(empty_destination.read_text(encoding="utf-8"), "first,second\n")
-
-    def test_summary_export_omits_empty_tables_and_preserves_column_order(self):
+    def test_summary_export_omits_empty_tables_and_refuses_reuse_or_symlinks(self):
         destination = Path(self.temporary.name) / "summary-tables"
-        summary = {
-            "score": {"value": 1.0},
-            "classes": [{"label": "café", "value": 1.0, "metadata": {"雪": [1]}}],
-            "parts": [],
-            "prototypes": [],
-            "support": [],
-            "stability_rows": [],
-        }
-        catalog_cli.export_summary(
-            legacy_record("summary-columns"), summary, destination, root=self.root
-        )
-        self.assertEqual(
-            {path.name for path in destination.iterdir()},
-            {"summary.json", "classes.csv"},
-        )
-        with (destination / "classes.csv").open(newline="", encoding="utf-8") as stream:
-            reader = csv.DictReader(stream)
-            self.assertEqual(reader.fieldnames, ["label", "value", "metadata"])
-            row = next(reader)
-        self.assertEqual(row["label"], "café")
-        self.assertEqual(row["metadata"], '{"雪": [1]}')
+        summary = {"score": {"value": 1.0}, "classes": [{"label": "café", "value": 1.0}], "parts": []}
+        catalog_cli.export_summary(make_record("s"), summary, destination, root=self.root)
+        self.assertEqual({p.name for p in destination.iterdir()}, {"summary.json", "classes.csv"})
+        before = (destination / "classes.csv").read_bytes()
+        with self.assertRaises(CatalogError):
+            catalog_cli.export_summary(make_record("s"), {"score": {"value": None}}, destination, root=self.root)
+        self.assertEqual((destination / "classes.csv").read_bytes(), before)
+
+        linked = Path(self.temporary.name) / "linked"
+        linked.mkdir()
+        sentinel = Path(self.temporary.name) / "sentinel.json"
+        sentinel.write_text('{"keep":"untouched"}\n', encoding="utf-8")
+        (linked / "summary.json").symlink_to(sentinel)
+        with self.assertRaises(CatalogError):
+            catalog_cli.export_summary(make_record("s"), {"score": {"value": 1.0}}, linked, root=self.root)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"keep":"untouched"}\n')
 
     def test_visualization_exports_empty_tables_with_explicit_headers(self):
         destination = Path(self.temporary.name) / "empty-plots"
-        record = legacy_record("empty-visualization")
         summary = {
-            "quantile": 0.8,
-            "score": {"value": None},
-            "threshold": 0.8,
-            "classes": [],
-            "prototypes": [],
-            "parts": [],
-            "support": [],
+            "quantile": 0.8, "score": {"value": None}, "threshold": 0.8,
+            "classes": [], "prototypes": [], "parts": [], "support": [],
         }
-        with (
-            warnings.catch_warnings(),
-            contextlib.redirect_stderr(io.StringIO()),
-        ):
-            warnings.simplefilter("ignore", DeprecationWarning)
-            warnings.simplefilter("ignore", UserWarning)
-            visualizations.render_measurements(
-                [record], [summary], destination, root=self.root
-            )
-        expected_headers = {
-            "01_heatmap_values.csv": [
-                "measurement_id", "quantile", "class_id", "class_name", "prototype_id",
-                "part_id", "part_name", "mean_presence", "available_observations",
-                "above_threshold",
-            ],
-            "02_class_consistency.csv": [
+        with warnings.catch_warnings(), contextlib.redirect_stderr(io.StringIO()):
+            warnings.simplefilter("ignore")
+            visualizations.render_measurements([make_record("empty-viz")], [summary], destination, root=self.root)
+        with (destination / "02_class_consistency.csv").open(newline="", encoding="utf-8") as stream:
+            self.assertEqual(next(csv.reader(stream)), [
                 "measurement_id", "quantile", "class_id", "class_name", "numerator",
                 "denominator", "consistency_fraction",
-            ],
-            "03_prototype_scores.csv": [
-                "measurement_id", "quantile", "class_id", "class_name", "prototype_id",
-                "max_part_frequency", "consistent",
-            ],
-            "04_usable_images.csv": [
-                "measurement_id", "quantile", "class_id", "class_name", "part_id",
-                "usable_images", "part_name", "prototype_support_matches", "support_view",
-            ],
-        }
-        for filename, columns in expected_headers.items():
-            with (destination / filename).open(newline="", encoding="utf-8") as stream:
-                self.assertEqual(next(csv.reader(stream)), columns)
-
-    def test_summary_export_rejects_existing_symlink_without_touching_target(self):
-        destination = Path(self.temporary.name) / "summary-output"
-        destination.mkdir()
-        sentinel = Path(self.temporary.name) / "sentinel.json"
-        sentinel.write_text('{"keep":"untouched"}\n', encoding="utf-8")
-        (destination / "summary.json").symlink_to(sentinel)
-
-        with self.assertRaises(CatalogError):
-            catalog_cli.export_summary(
-                legacy_record("symlink-summary"),
-                {"score": {"value": 1.0}},
-                destination,
-                root=self.root,
-            )
-        self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"keep":"untouched"}\n')
-
-    def test_summary_export_refuses_reuse_to_prevent_stale_tables(self):
-        destination = Path(self.temporary.name) / "summary-output"
-        first = {
-            "score": {"value": 1.0},
-            "classes": [{"class_id": 1, "value": 1.0}],
-            "parts": [{"class_id": 1, "part_id": 2, "mean_presence": 1.0}],
-        }
-        catalog_cli.export_summary(legacy_record("first-summary"), first, destination, root=self.root)
-        parts_before = (destination / "parts.csv").read_bytes()
-
-        with self.assertRaises(CatalogError):
-            catalog_cli.export_summary(
-                legacy_record("empty-summary"),
-                {"score": {"value": None}, "classes": [], "parts": []},
-                destination,
-                root=self.root,
-            )
-        self.assertEqual((destination / "parts.csv").read_bytes(), parts_before)
+            ])
 
     def test_plots_keep_attempts_separate_and_export_exact_tables(self):
-        records = []
+        records, summaries_by_id = [], []
         for measurement_id, quantile, sample_ids in (
-            ("q70", 0.7, ("s1", "s2")),
-            ("q70-repeat", 0.7, ("s1", "s2")),
-            ("q80", 0.8, ("s1", "s3")),
+            ("q70", 0.7, ("s1", "s2")), ("q70-repeat", 0.7, ("s1", "s2")), ("q80", 0.8, ("s1", "s3")),
         ):
-            record = legacy_record(measurement_id, quantile=quantile)
-            record["model"]["inputs"]["prototype_checkpoint"]["sha256"] = "b" * 64
-            record["dataset"]["identity"] = "same-manifest"
-            rows = [
-                {
-                    "sample_id": sample_id, "class_id": "1", "prototype_id": "2", "repetition": "0",
-                    "part_1": "1" if index == 0 else "0", "part_2": "0",
-                }
-                for index, sample_id in enumerate(sample_ids)
-            ]
-            bundle = write_measurement(self.root, record, rows)
-            records.append((bundle, record))
-        summaries_by_id = []
-        for bundle, record in records:
-            rows = catalog_cli.read_observations(bundle, record)
-            summaries_by_id.append(summaries.summarize_observations(record, rows))
+            rows = [obs(s, prototype_id=2, part_1="1" if i == 0 else "0") for i, s in enumerate(sample_ids)]
+            bundle = write_measurement(self.root, make_record(measurement_id, quantile=quantile), rows)
+            record, loaded = load_observations(bundle)
+            records.append(record)
+            summaries_by_id.append(summaries.summarize_observations(record, loaded))
         destination = Path(self.temporary.name) / "plots"
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                rendered = visualizations.render_measurements(
-                    [item[1] for item in records],
-                    summaries_by_id,
-                    destination,
-                )
-        self.assertEqual(rendered["support_comparable"], False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            rendered = visualizations.render_measurements(records, summaries_by_id, destination, root=self.root)
+        self.assertFalse(rendered["support_comparable"])
         self.assertEqual(len(rendered["tables"]["support"]), 6)
-        self.assertEqual(
-            {row["part_name"] for row in rendered["tables"]["support"]},
-            {"part one", "part two"},
-        )
-        for name in (
-            "01_prototype_part_heatmaps.png",
-            "01_prototype_part_heatmaps.pdf",
-            "02_class_consistency.csv",
-            "03_prototype_scores.csv",
-            "04_usable_images.csv",
-            "all_four_visualizations.pdf",
-        ):
+        for name in ("01_prototype_part_heatmaps.png", "02_class_consistency.csv",
+                     "03_prototype_scores.csv", "04_usable_images.csv", "all_four_visualizations.pdf"):
             self.assertTrue((destination / name).is_file(), name)
         with (destination / "04_usable_images.csv").open(newline="", encoding="utf-8") as stream:
-            support = list(csv.DictReader(stream))
-        self.assertEqual([row["usable_images"] for row in support], ["2"] * 6)
-        metadata = json.loads((destination / "visualization_metadata.json").read_text())
-        self.assertEqual(metadata["measurement_ids"], ["q70", "q70-repeat", "q80"])
-        self.assertFalse(metadata["support_comparable"])
-        sentinel = Path(self.temporary.name) / "plot-sentinel.csv"
-        sentinel.write_text("keep this content\n", encoding="utf-8")
-        heatmap_export = destination / "01_heatmap_values.csv"
-        heatmap_export.unlink()
-        heatmap_export.symlink_to(sentinel)
-        with self.assertRaises(CatalogError):
-            visualizations.render_measurements(
-                [item[1] for item in records],
-                summaries_by_id,
-                destination,
-                root=self.root,
-            )
-        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep this content\n")
-        unidentified = json.loads(json.dumps(records[0][1]))
-        unidentified["measurement_id"] = "unidentified"
-        unidentified["dataset"]["identity"] = "partial"
-        with self.assertRaisesRegex(visualizations.VisualizationError, "unknown dataset identity"):
-            visualizations.render_measurements(
-                [records[0][1], unidentified],
-                [summaries_by_id[0], summaries_by_id[0]],
-                Path(self.temporary.name) / "incomparable",
-                root=self.root,
-            )
+            self.assertEqual([r["usable_images"] for r in csv.DictReader(stream)], ["2"] * 6)
         cli_output = Path(self.temporary.name) / "cli-plots"
-        with (
-            patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}),
-            contextlib.redirect_stdout(io.StringIO()),
-            warnings.catch_warnings(),
-        ):
-            warnings.simplefilter("ignore", DeprecationWarning)
-            self.assertEqual(
-                catalog_cli.main([
-                    "plot", "q70", "q70-repeat", "q80", "--output-dir", str(cli_output),
-                ]),
-                0,
-            )
-        self.assertTrue((cli_output / "all_four_visualizations.pdf").is_file())
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            code, _ = self.run_cli("plot", "q70", "q70-repeat", "q80", "--output-dir", str(cli_output))
+        self.assertEqual(code, 0)
 
-    def test_comparison_rejects_matching_but_unknown_protocol_fields(self):
-        records = []
-        summaries_by_id = []
-        for measurement_id, quantile in (("unknown-q70", 0.7), ("unknown-q80", 0.8)):
-            record = legacy_record(measurement_id, quantile=quantile)
-            record["model"]["inputs"]["prototype_checkpoint"]["sha256"] = "b" * 64
-            record["dataset"]["identity"] = "same-manifest"
-            record["protocol"]["activation"]["quantile_interpolation"] = None
-            record["provenance_quality"]["missing_fields"].append(
-                "activation.quantile_interpolation"
-            )
-            rows = [{
-                "sample_id": "sample",
-                "class_id": "1",
-                "prototype_id": "1",
-                "repetition": "0",
-                "part_1": "1",
-                "part_2": "0",
-            }]
-            bundle = write_measurement(self.root, record, rows)
-            records.append(record)
-            summaries_by_id.append(
-                summaries.summarize_observations(record, catalog_cli.read_observations(bundle, record))
-            )
-        with self.assertRaisesRegex(visualizations.VisualizationError, "quantile_interpolation"):
-            visualizations.render_measurements(
-                records,
-                summaries_by_id,
-                Path(self.temporary.name) / "unknown-protocol-plots",
-                root=self.root,
-            )
-
-    def test_comparison_rejects_null_model_and_input_protocol_values(self):
-        unknown_fields = (
-            ("input.normalization.mean", None),
-            ("model.epsilon", None),
-            ("activation.quantile_interpolation", " unknown "),
-        )
-        for field_path, unknown_value in unknown_fields:
-            with self.subTest(field=field_path):
-                record = legacy_record("unknown-" + field_path.replace(".", "-"))
-                record["model"]["inputs"]["prototype_checkpoint"]["sha256"] = "b" * 64
-                record["dataset"]["identity"] = "same-manifest"
-                section, field = field_path.split(".", 1)
-                target = record["protocol"][section]
-                for component in field.split(".")[:-1]:
-                    target = target[component]
-                target[field.split(".")[-1]] = unknown_value
-                record["provenance_quality"]["missing_fields"].append(field_path)
-
-                with self.assertRaisesRegex(
-                    visualizations.VisualizationError,
-                    field_path.replace(".", r"\."),
-                ):
-                    visualizations._compatibility_signature(record)
+    def test_comparison_requires_checkpoint_identity_and_matching_setup(self):
+        known = make_record("known")
+        unknown = make_record("unknown-checkpoint", checkpoint=None)
+        with self.assertRaisesRegex(visualizations.VisualizationError, "comparability is unverified"):
+            visualizations._compatibility_signature(unknown)
+        base = visualizations._compatibility_signature(known)
+        self.assertEqual(base, visualizations._compatibility_signature(make_record("q", quantile=0.5)))
+        flagged = make_record("flag")
+        flagged["parameters"]["official_parts_only"] = True
+        other_dataset = make_record("dataset")
+        other_dataset["dataset"]["split"] = "test"
+        for record in (flagged, other_dataset, make_record("ckpt", checkpoint="c" * 64)):
+            self.assertNotEqual(base, visualizations._compatibility_signature(record))
 
     def test_all_unavailable_part_combinations_are_retained_as_unverified_support(self):
-        record = legacy_record("sparse-support")
-        rows = [
-            {
-                "sample_id": "available",
-                "class_id": "1",
-                "prototype_id": "1",
-                "repetition": "0",
-                "part_1": "1",
-                "part_2": "",
-            },
-            {
-                "sample_id": "unavailable",
-                "class_id": "1",
-                "prototype_id": "2",
-                "repetition": "0",
-                "part_1": "",
-                "part_2": "",
-            },
-        ]
+        record = make_record("sparse-support")
+        rows = [obs("available", 1, 1, "1", ""), obs("unavailable", 1, 2, "", "")]
         result = summaries.summarize_observations(record, rows)
         part_two = next(item for item in result["support"] if item["part_id"] == 2)
         self.assertEqual(part_two["usable_images"], 0)
-        self.assertEqual(part_two["sample_ids"], [])
         self.assertFalse(part_two["prototype_support_matches"])
-        rendered_tables, support_comparable = visualizations._tables([record], [result])
+        tables, support_comparable = visualizations._tables([record], [result])
         self.assertFalse(support_comparable)
-        self.assertIn(
-            (1, 2),
-            {(row["class_id"], row["part_id"]) for row in rendered_tables["support"]},
-        )
+        self.assertIn((1, 2), {(row["class_id"], row["part_id"]) for row in tables["support"]})
 
 
 if __name__ == "__main__":

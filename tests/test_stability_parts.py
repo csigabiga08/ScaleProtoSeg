@@ -54,7 +54,6 @@ class StabilityPartsTests(unittest.TestCase):
             self.assertEqual(result["protocol"]["stability"]["seed"], 41)
             self.assertEqual(result["parameters"]["seed"], 41)
             self.assertNotIn("seed", result["model"])
-            self.assertIsNone(result["model"]["training_seed"])
 
     def test_stability_observations_use_one_based_evaluator_class_ids(self):
         import pandas as pd

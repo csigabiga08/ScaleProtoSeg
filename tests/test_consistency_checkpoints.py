@@ -49,7 +49,6 @@ class ConsistencyCheckpointTests(unittest.TestCase):
             self.assertIn("group_projection", result["protocol"]["prototype_selection"]["group_nonzero_rule"])
             self.assertEqual(result["protocol"]["prototype_selection"]["excluded_evaluation_class_ids"], [1, 5, 10, 12, 19])
             self.assertNotIn("seed", result["model"])
-            self.assertIsNone(result["model"]["training_seed"])
 
     def test_catalog_root_is_validated_before_model_loading(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:

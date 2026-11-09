@@ -136,10 +136,6 @@ class ConsistencyPartsTests(unittest.TestCase):
                     unfiltered["protocol"]["parts"]["class_dependent_part_definitions"]["bus"]["semantic_ids"],
                     [28],
                 )
-                self.assertEqual(
-                    unfiltered["protocol"]["parts"]["mapping_identity"]["identity_kind"],
-                    "official Cityscapes filter implementation",
-                )
                 unfiltered_score = unfiltered["scores"]["consistency"]["value"]
 
                 with self.assertRaises(FileNotFoundError):
@@ -304,13 +300,8 @@ class ConsistencyPartsTests(unittest.TestCase):
                 "no eligible class/prototype observations",
             )
             self.assertEqual(record["population"]["excluded"], 1)
-            self.assertEqual(record["population"]["processed_no_observations"], 1)
-            with (bundle / "samples.csv").open(newline="") as stream:
-                samples = list(csv.DictReader(stream))
-            self.assertEqual(
-                [(row["sample_id"], row["outcome"]) for row in samples],
-                [("missing", "excluded"), ("empty", "processed_no_observations")],
-            )
+            self.assertEqual(record["population"]["contributing"], 0)
+            self.assertEqual(record["population"]["observations"], 0)
 
     def test_processing_error_publishes_failed_and_unattempted_candidates(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
@@ -341,10 +332,7 @@ class ConsistencyPartsTests(unittest.TestCase):
             self.assertEqual(record["status"], "failed")
             self.assertEqual(record["population"]["failed"], 1)
             self.assertEqual(record["population"]["not_attempted"], 1)
-            with (bundle / "samples.csv").open(newline="") as stream:
-                samples = list(csv.DictReader(stream))
-            self.assertEqual([row["outcome"] for row in samples], ["failed", "not_attempted"])
-            self.assertIn("ValueError", samples[0]["reason"])
+            self.assertEqual(record["failure"]["type"], "ValueError")
 
 
 if __name__ == "__main__":

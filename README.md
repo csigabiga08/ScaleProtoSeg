@@ -201,7 +201,6 @@ by `MEASUREMENT_CATALOG_ROOT`:
   measurements/<measurement-uuid>/
     result.json
     observations.csv
-    samples.csv
 ```
 
 Set `MEASUREMENT_CATALOG_ROOT` in the job environment or in this checkout's ignored
@@ -213,16 +212,18 @@ an exported root takes precedence, and catalog lookup does not load other settin
 into the environment. Metadata validation uses Pydantic, pinned in both dependency
 profiles; filesystem integrity and scientific comparability are checked separately.
 
-`result.json` records schema version, run status, checkpoint identities and hashes,
-dataset identity coverage, the expanded metric protocol, selected and contributing
-prototype IDs, population counts, scores, source/package provenance and artifact
-hashes. It is first published as `running`, then atomically replaced with a terminal
-`complete` or `failed` record. A native completed bundle contains exactly the three
+`result.json` records run status, checkpoint identities, the dataset, the expanded
+metric protocol and parameters (quantile, seed and the metric flags), selected
+prototype IDs, scores, source/package provenance and the observations artifact
+(path, size, SHA-256). It is first published as `running`, then atomically replaced
+with a terminal `complete` or `failed` record. A bundle contains exactly the two
 files above. Observations use stable sample/class/prototype/repetition keys; blank
 consistency part values mean unavailable, while zero means an observed miss.
 Stability stores clean and noisy part vectors rather than derived equality flags.
-Candidate outcome rows distinguish excluded, empty, contributing, failed and
-not-attempted samples. Repeated configurations are separate measurements.
+A sample is contributing if it appears in `observations.csv`; `population` only
+counts candidates, contributing, excluded, failed and not-attempted samples. There
+is no schema or protocol version: a changed metric definition must be added behind a
+new flag. Repeated configurations are separate measurements.
 
 Both calculators accept these part and centroid options:
 
@@ -289,15 +290,14 @@ or model code:
   --metric consistency --dataset pascal --quantile 0.8 \
   --variant protocol.consistency.threshold=0.8
 .venv/bin/python -m segmentation.analysis.metrics.catalog_cli filter \
-  --all-status --status failed --provenance-gap 'part annotation'
+  --all-status --status failed
 ```
 
 Running and failed measurements remain discoverable with `--all-status`; direct
 non-complete status filters also require that opt-in. Summaries default to complete
 records; finalized failed records may be inspected with `summarize --all-status`,
-but running records cannot be summarized. Unknown provenance and extension fields are
-retained in metadata and exported CSVs. Export a flat comparison table with the
-complete nested record preserved in `metadata_json`:
+but running records cannot be summarized. Export a flat comparison table of the
+selected records:
 
 ```bash
 .venv/bin/python -m segmentation.analysis.metrics.catalog_cli export \
@@ -317,16 +317,13 @@ summary tables outside the canonical catalog bundle:
   --output-dir /path/to/analysis/<measurement-id>
 ```
 
-Consistency summaries use the recorded protocol version and aggregation rule:
+Consistency summaries use the recorded aggregation rule:
 per-part means omit blank/NaN unavailable values, while observed zero remains a miss;
 consistency uses strict `mean > threshold` and weights class/prototype rows as the
 recorded evaluator does. Stability summaries compare paired clean/noisy part vectors
 and do not substitute missing values with zero. Unknown aggregation or comparison
-protocols are rejected rather than reinterpreted. The known historical evaluator
-profile is identified explicitly as `scaleprotoseg-v1`; its recorded aggregation
-descriptor must still match. Legacy records without complete
-candidate membership remain visible with explicit diagnostics; summaries use only
-available observation artifacts and do not invent excluded samples.
+protocols are rejected rather than reinterpreted. `validate` checks metadata, the
+observations artifact size and hash, and the population counts against the rows.
 
 ### Catalog visualizations
 

@@ -1,4 +1,4 @@
-"""Contract tests for native metric measurement bundles."""
+"""Contract tests for measurement bundles: writer, loader, and root resolution."""
 
 import csv
 import hashlib
@@ -17,11 +17,10 @@ from segmentation.analysis.metrics.catalog import (
     CatalogError,
     iter_measurements,
     load_measurement,
+    load_observations,
     resolve_catalog_root,
-    validate_result,
 )
 from segmentation.analysis.metrics.output import MetricOutput
-from segmentation.analysis.metrics.population import ordered_ids_sha256, population_counts
 from segmentation.analysis.metrics.provenance import dataset_provenance
 import segmentation.analysis.metrics.provenance as metric_provenance
 
@@ -36,138 +35,32 @@ class MetricCatalogTests(unittest.TestCase):
         self.checkpoint.write_bytes(b"tiny checkpoint payload")
 
     def make_output(self, **parameters):
-        output = MetricOutput(
+        return MetricOutput(
             "consistency",
             self.checkpoint,
             "pascal",
             model_name="fixture",
             training_phase="push",
             protocol={
-                "version": 1,
                 "metric": "consistency",
-                "activation": {
-                    "prototype_distance_activation": "log",
-                    "prototype_activation_function": "log",
-                    "normalization_mean": [0.485, 0.456, 0.406],
-                    "normalization_std": [0.229, 0.224, 0.225],
-                    "resize_interpolation": "cv2.INTER_NEAREST",
-                    "quantile_support": "semantic-class mask",
-                    "quantile_interpolation": "torch.quantile linear",
-                    "active_comparison": "strictly greater than quantile",
-                    "quantile_class_mask": "semantic class mask",
-                },
-                "centroids": {
-                    "component_rule": "OpenCV 8-connected components, rounded centroids",
-                    "background_component_centroid_included": True,
-                    "exclude_background_centroid": False,
-                },
-                "parts": {
-                    "valid_part_ids": [1, 2, 3],
-                    "maximum_part_id": 3,
-                    "mapping_identity": {
-                        "status": "available",
-                        "path": "fixture/parts.yaml",
-                        "bytes": 1,
-                        "sha256": "a" * 64,
-                    },
-                    "class_dependent_part_definitions": {"fixture": {"1": "fixture part"}},
-                    "annotation_provenance": "fixture annotation provenance",
-                },
-                "classes": {
-                    "id_convention": {
-                        "semantic_mapping_input_ids": "source annotation IDs",
-                        "semantic_mapping_output_ids": "one-based evaluator IDs",
-                        "model_class_index": "evaluation_class_id - 1",
-                    },
-                    "evaluation_class_id_to_label": {"2": "aeroplane"},
-                    "ignored_or_void_evaluation_class_id": 0,
-                    "background_evaluation_class_id": 1,
-                    "excluded_evaluation_class_ids": [1],
-                },
-                "consistency": {
-                    "threshold": 0.8,
-                    "strict_comparison": "mean part presence > threshold",
-                    "prototype_class_consistent": "any part flag is one",
-                    "aggregation": "unweighted mean over class/prototype rows",
-                },
-                "model": {"epsilon": 1e-4, "prototype_activation_function": "log"},
-                "input": {
-                    "source": "cached validation image",
-                    "resolution": "native resolution",
-                    "normalization": {
-                        "conversion": "PIL RGB uint8 to tensor in [0, 1]",
-                        "mean": [0.485, 0.456, 0.406],
-                        "std": [0.229, 0.224, 0.225],
-                    },
-                },
-                "prototype_selection": {
-                    "class_identity_rule": "evaluation_class_id - 1",
-                    "excluded_evaluation_class_ids": [1],
-                    "grouping_active": False,
-                    "group_nonzero_rule": "nonzero group projection",
-                    "group_intersection_rule": "no grouping-checkpoint filter",
-                },
+                "quantile": 0.8,
+                "consistency": {"threshold": 0.8},
                 "observation_columns": ["part_1", "part_2", "part_3"],
             },
             **parameters,
         )
-        missing_fields = output.result["provenance_quality"]["missing_fields"]
-        missing_fields.remove("model epsilon")
-        missing_fields.remove("model.prototype_activation_function")
-        return output
 
-    def test_population_helpers_count_every_outcome_and_hash_unicode_order(self):
-        samples = [
-            {"outcome": "not_attempted"},
-            {"outcome": "excluded"},
-            {"outcome": "processed_no_observations"},
-            {"outcome": "contributed"},
-            {"outcome": "failed"},
-        ]
-        self.assertEqual(population_counts(samples, 4), {
-            "candidates": 5,
-            "attempted": 3,
-            "processed": 2,
-            "contributing": 1,
-            "failed": 1,
-            "excluded": 1,
-            "not_attempted": 1,
-            "processed_no_observations": 1,
-            "observations": 4,
-        })
-        self.assertEqual(
-            ordered_ids_sha256(["é", "雪", "e\u0301"]),
-            "68bfec7053b99f8ce472a529da024cb964df5a1d92e3fe304714f47359b4cef5",
+    def finished_bundle(self):
+        output = self.make_output()
+        output.set_candidates(["used", "other"])
+        output.start_sample("used")
+        output.add_observation(
+            sample_id="used", class_id=3, prototype_id=12, repetition=0, part_1=1, part_2=None, part_3=0,
         )
-
-    def test_native_validator_rejects_population_and_candidate_order_corruption(self):
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
-            output.set_candidates(["é", "雪"])
-            output.mark_sample("é", "excluded", "fixture")
-            output.mark_sample("雪", "excluded", "fixture")
-            output.finish(value=0.0, numerator=0, denominator=1)
-            path = output.path / "result.json"
-            original = json.loads(path.read_text())
-            for mutation, message in (
-                (lambda value: value["population"].update(candidates=3), "Population count mismatch"),
-                (lambda value: value["dataset"].update(candidate_order_sha256="0" * 64), "candidate_order_sha256"),
-            ):
-                result = json.loads(json.dumps(original))
-                mutation(result)
-                path.write_text(json.dumps(result))
-                with self.assertRaisesRegex(CatalogError, message):
-                    load_measurement(output.path)
-            path.write_text(json.dumps(original))
-
-    def test_helpers_import_without_torch_or_settings(self):
-        code = (
-            "import sys; "
-            "from segmentation.analysis.metrics import catalog, output; "
-            "assert 'torch' not in sys.modules; "
-            "assert 'settings' not in sys.modules"
-        )
-        subprocess.run([sys.executable, "-c", code], check=True, cwd=Path.cwd())
+        output.complete_sample("used")
+        output.mark_excluded("other")
+        output.finish(value=1.0, numerator=1, denominator=1)
+        return output.path
 
     def test_exported_root_overrides_checkout_dotenv(self):
         dotenv = Path(self.temporary.name) / ".env"
@@ -211,321 +104,132 @@ class MetricCatalogTests(unittest.TestCase):
             self.assertNotIn("CATALOG_PARENT", os.environ)
             self.assertNotIn("UNRELATED_SETTING", os.environ)
 
-    def test_dotenv_preserves_hash_in_quoted_path_with_trailing_comment(self):
-        root = self.root.parent / "catalog#shared"
-        root.mkdir()
-        dotenv = root.parent / ".env"
-        dotenv.write_text(f'MEASUREMENT_CATALOG_ROOT="{root}" # output root\n')
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(resolve_catalog_root(checkout=dotenv.parent), root.resolve())
+    def test_helpers_import_without_torch_or_settings(self):
+        code = (
+            "import sys; "
+            "from segmentation.analysis.metrics import catalog, output; "
+            "assert 'torch' not in sys.modules; "
+            "assert 'settings' not in sys.modules"
+        )
+        subprocess.run([sys.executable, "-c", code], check=True, cwd=Path.cwd())
 
     def test_identical_input_paths_are_hashed_once_for_separate_checkpoint_roles(self):
         with (
             patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}),
             patch.object(metric_provenance, "sha256_file", wraps=metric_provenance.sha256_file) as hash_file,
         ):
-            output = MetricOutput(
-                "consistency",
-                self.checkpoint,
-                "pascal",
-                model_name="fixture",
-                training_phase="push",
-                protocol={"version": 1, "observation_columns": ["part_1"]},
-                group_checkpoint=self.checkpoint,
-            )
+            output = self.make_output(group_checkpoint=self.checkpoint)
             inputs = output.result["model"]["inputs"]
             self.assertEqual(inputs["prototype_checkpoint"]["sha256"], inputs["group_checkpoint"]["sha256"])
-            hash_file.assert_called_once_with(self.checkpoint.resolve())
+            hash_file.assert_called_once_with(str(self.checkpoint.resolve()))
 
-    def test_writer_publishes_three_hashed_files_and_reconciled_population(self):
+    def test_writer_publishes_hashed_observations_and_population_counts(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
+            output = self.make_output(quantile=0.8, seed=41)
             self.assertEqual(output.result["status"], "running")
             output.set_candidates(["missing", "empty", "used"])
-            output.mark_sample("missing", "excluded", "missing_part_annotation")
+            output.mark_excluded("missing")
             output.start_sample("empty")
             output.complete_sample("empty")
             output.start_sample("used")
             output.add_observation(
-                sample_id="used",
-                class_id=3,
-                prototype_id=12,
-                repetition=0,
-                part_1=1,
-                part_2=None,
-                part_3=0,
+                sample_id="used", class_id=3, prototype_id=12, repetition=0, part_1=1, part_2=None, part_3=0,
             )
             output.complete_sample("used")
             output.set_selected_prototype_ids([12, 19])
             output.finish(value=0.5, numerator=1, denominator=2)
 
             bundle = output.path
-            self.assertEqual(
-                {path.name for path in bundle.iterdir()},
-                {"result.json", "observations.csv", "samples.csv"},
-            )
+            self.assertEqual({path.name for path in bundle.iterdir()}, {"result.json", "observations.csv"})
             record = load_measurement(bundle)
             self.assertEqual(record["status"], "complete")
-            self.assertEqual(record["scores"]["consistency"], {
-                "value": 0.5,
-                "unit": "fraction",
-                "numerator": 1,
-                "denominator": 2,
-            })
-            self.assertEqual(record["population"]["candidates"], 3)
-            self.assertEqual(record["population"]["attempted"], 2)
-            self.assertEqual(record["population"]["contributing"], 1)
-            self.assertEqual(record["population"]["excluded"], 1)
-            self.assertEqual(record["population"]["processed_no_observations"], 1)
-            self.assertEqual(record["selected_prototype_ids"], [12, 19])
-            self.assertEqual(record["contributing_prototype_ids"], [12])
-            with (bundle / "observations.csv").open(newline="") as stream:
-                observation = next(csv.DictReader(stream))
-            self.assertEqual(observation["part_1"], "1")
-            self.assertEqual(observation["part_2"], "")
-            self.assertEqual(observation["part_3"], "0")
-            with (bundle / "samples.csv").open(newline="") as stream:
-                rows = list(csv.DictReader(stream))
-            self.assertEqual([row["outcome"] for row in rows], [
-                "excluded", "processed_no_observations", "contributed",
-            ])
-            for artifact in record["artifacts"].values():
-                artifact_path = bundle / artifact["path"]
-                self.assertEqual(artifact["bytes"], artifact_path.stat().st_size)
-                self.assertEqual(
-                    artifact["sha256"],
-                    hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
-                )
-
-    def test_nonfinite_score_is_null_with_reason_and_complete_bundle(self):
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
-            output.set_candidates([])
-            output.finish(value=float("nan"), reason="no eligible prototype observations")
-            record = load_measurement(output.path)
-            self.assertIsNone(record["scores"]["consistency"]["value"])
             self.assertEqual(
-                record["scores"]["consistency"]["reason"],
-                "no eligible prototype observations",
+                record["scores"]["consistency"],
+                {"value": 0.5, "unit": "fraction", "numerator": 1, "denominator": 2},
             )
-            self.assertIsNone(record["scores"]["consistency"]["numerator"])
+            self.assertEqual(record["parameters"], {"quantile": 0.8, "seed": 41})
+            self.assertEqual(record["population"], {
+                "candidates": 3, "contributing": 1, "excluded": 1, "failed": 0,
+                "not_attempted": 0, "observations": 1,
+            })
+            self.assertEqual(record["selected_prototype_ids"], [12, 19])
+            artifact = record["artifacts"]["observations"]
+            self.assertEqual(artifact["bytes"], (bundle / "observations.csv").stat().st_size)
+            self.assertEqual(artifact["sha256"], hashlib.sha256((bundle / "observations.csv").read_bytes()).hexdigest())
+            _result, rows = load_observations(bundle)
+            self.assertEqual(rows, [{
+                "sample_id": "used", "class_id": "3", "prototype_id": "12", "repetition": "0",
+                "part_1": "1", "part_2": "", "part_3": "0",
+            }])
 
-    def test_terminal_records_require_native_metadata_sections(self):
-        required_sections = (
-            ("model", "inputs"),
-            ("protocol", None),
-            ("execution", None),
-            ("provenance_quality", None),
-            ("dataset", "identity"),
-            ("execution", "packages"),
-            ("provenance_quality", "missing_fields"),
-        )
+    def test_nonfinite_score_is_null_with_reason(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output()
             output.set_candidates([])
             output.finish(value=float("nan"), reason="no eligible prototype observations")
-            result_path = output.path / "result.json"
-            original = json.loads(result_path.read_text())
-            for section, child in required_sections:
-                with self.subTest(section=section, child=child):
-                    result = json.loads(json.dumps(original))
-                    if child is None:
-                        result.pop(section)
-                    elif section in result:
-                        result[section].pop(child)
-                    result_path.write_text(json.dumps(result))
-                    with self.assertRaisesRegex(CatalogError, "missing"):
-                        load_measurement(output.path)
-            result_path.write_text(json.dumps(original))
-            self.assertEqual(load_measurement(output.path)["status"], "complete")
+            score = load_measurement(output.path)["scores"]["consistency"]
+            self.assertIsNone(score["value"])
+            self.assertEqual(score["reason"], "no eligible prototype observations")
 
-    def test_metadata_schema_rejects_wrong_protocol_types_without_coercion(self):
+    def test_metadata_requires_its_sections_and_artifact_for_complete_records(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
-            output.set_candidates([])
-            output.finish(value=0.0, numerator=0, denominator=1)
-            for section, field, value in (
-                ("consistency", "strict_comparison", 42),
-                ("consistency", "threshold", True),
-                ("activation", "normalization_mean", ["0.1", 0.2, 0.3]),
+            bundle = self.finished_bundle()
+            original = json.loads((bundle / "result.json").read_text())
+            for mutation in (
+                lambda value: value.pop("protocol"),
+                lambda value: value.pop("parameters"),
+                lambda value: value["artifacts"].clear(),
+                lambda value: value["scores"].clear(),
+                lambda value: value["scores"]["consistency"].update(value=None),
+                lambda value: value["artifacts"]["observations"].update(sha256="xyz"),
             ):
-                with self.subTest(section=section, field=field):
-                    result = json.loads(json.dumps(output.result))
-                    result["protocol"][section][field] = value
-                    with self.assertRaises(CatalogError):
-                        validate_result(result)
+                result = json.loads(json.dumps(original))
+                mutation(result)
+                (bundle / "result.json").write_text(json.dumps(result))
+                with self.assertRaisesRegex(CatalogError, "Invalid measurement metadata"):
+                    load_measurement(bundle)
 
-    def test_metadata_validation_preserves_extensions_and_explicit_nulls(self):
+    def test_loader_rejects_tampered_artifacts_and_inconsistent_counts(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
-            output.set_candidates([])
-            output.finish(value=0.0, numerator=0, denominator=1)
-            result = output.result
-            result["extension"] = {"unrecognized": [None, "preserve"]}
-            result["protocol"]["consistency"]["extension"] = {"note": None}
-            before = json.dumps(result, sort_keys=True)
-            self.assertIs(validate_result(result), result)
-            self.assertEqual(json.dumps(result, sort_keys=True), before)
+            bundle = self.finished_bundle()
+            original = json.loads((bundle / "result.json").read_text())
+            for key, value, message in (
+                ("contributing", 2, "Contributing sample count"),
+                ("observations", 5, "Observation count"),
+            ):
+                result = json.loads(json.dumps(original))
+                result["population"][key] = value
+                (bundle / "result.json").write_text(json.dumps(result))
+                with self.assertRaisesRegex(CatalogError, message):
+                    load_measurement(bundle)
+            (bundle / "result.json").write_text(json.dumps(original))
 
-    def test_completed_record_rejects_missing_checkpoint_identity_even_with_declared_gap(self):
+            result = json.loads(json.dumps(original))
+            result["protocol"]["observation_columns"] = ["part_1"]
+            (bundle / "result.json").write_text(json.dumps(result))
+            with self.assertRaisesRegex(CatalogError, "columns disagree"):
+                load_observations(bundle)
+            (bundle / "result.json").write_text(json.dumps(original))
+
+            same_size = (bundle / "observations.csv").read_bytes().replace(b"1,,0", b"0,,0")
+            (bundle / "observations.csv").write_bytes(same_size)
+            with self.assertRaisesRegex(CatalogError, "hash"):
+                load_measurement(bundle)
+            self.assertEqual(load_measurement(bundle, verify_hashes=False)["status"], "complete")
+            (bundle / "observations.csv").write_text("corrupt\n")
+            with self.assertRaisesRegex(CatalogError, "byte size"):
+                load_measurement(bundle)
+
+    def test_artifact_paths_cannot_escape_their_bundle(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
-            output.set_candidates([])
-            output.finish(value=0.0, numerator=0, denominator=1)
-            result_path = output.path / "result.json"
-            original = json.loads(result_path.read_text())
-            for identity_field in ("path", "bytes", "sha256", "status"):
-                with self.subTest(identity_field=identity_field):
-                    result = json.loads(json.dumps(original))
-                    result["model"]["inputs"]["prototype_checkpoint"].pop(identity_field)
-                    result["provenance_quality"]["missing_fields"].append("prototype_checkpoint SHA-256")
-                    result_path.write_text(json.dumps(result))
-                    with self.assertRaisesRegex(CatalogError, "checkpoint identity"):
-                        load_measurement(output.path)
-            result_path.write_text(json.dumps(original))
+            bundle = self.finished_bundle()
+            result = json.loads((bundle / "result.json").read_text())
+            result["artifacts"]["observations"]["path"] = "../escape.csv"
+            (bundle / "result.json").write_text(json.dumps(result))
+            with self.assertRaisesRegex(CatalogError, "out-of-bundle"):
+                load_measurement(bundle)
 
-    def test_completed_record_accepts_checkpoint_identity_only_when_unknown_is_justified(self):
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
-            output.set_candidates([])
-            output.finish(value=0.0, numerator=0, denominator=1)
-            result_path = output.path / "result.json"
-            result = json.loads(result_path.read_text())
-            identity = result["model"]["inputs"]["prototype_checkpoint"]
-            identity.update(
-                bytes=None,
-                sha256=None,
-                status="unknown",
-                reason="checkpoint source was unavailable to the measurement process",
-            )
-            result["provenance_quality"]["missing_fields"].append("prototype_checkpoint SHA-256")
-            result_path.write_text(json.dumps(result))
-            self.assertEqual(load_measurement(output.path)["status"], "complete")
-
-    def test_completed_record_rejects_missing_expanded_protocol_sections(self):
-        protocol_sections = (
-            "activation", "centroids", "parts", "classes", "consistency",
-            "model", "input", "prototype_selection",
-        )
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
-            output.set_candidates([])
-            output.finish(value=0.0, numerator=0, denominator=1)
-            result_path = output.path / "result.json"
-            original = json.loads(result_path.read_text())
-            for section in protocol_sections:
-                with self.subTest(section=section):
-                    result = json.loads(json.dumps(original))
-                    result["protocol"].pop(section)
-                    result["provenance_quality"]["missing_fields"] = []
-                    result_path.write_text(json.dumps(result))
-                    with self.assertRaisesRegex(CatalogError, "protocol"):
-                        load_measurement(output.path)
-            result_path.write_text(json.dumps(original))
-
-    def test_completed_record_rejects_minimal_protocol_without_declared_gaps(self):
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
-            output.set_candidates([])
-            output.finish(value=0.0, numerator=0, denominator=1)
-            result_path = output.path / "result.json"
-            result = json.loads(result_path.read_text())
-            result["protocol"] = {
-                "version": 1,
-                "metric": "consistency",
-                "observation_columns": ["part_1"],
-            }
-            result["provenance_quality"]["missing_fields"] = []
-            result_path.write_text(json.dumps(result))
-            with self.assertRaisesRegex(CatalogError, "protocol"):
-                load_measurement(output.path)
-
-    def test_completed_record_rejects_protocol_unknowns_without_matching_gap(self):
-        unknown_fields = (
-            ("activation", "quantile_support", "activation.quantile_support"),
-            ("input.normalization", "mean", "input.normalization.mean"),
-            ("parts.mapping_identity", None, "parts.mapping_identity"),
-        )
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
-            output.set_candidates([])
-            output.finish(value=0.0, numerator=0, denominator=1)
-            result_path = output.path / "result.json"
-            original = json.loads(result_path.read_text())
-            for path, field, missing_name in unknown_fields:
-                with self.subTest(path=path, field=field):
-                    result = json.loads(json.dumps(original))
-                    target = result["protocol"]
-                    for part in path.split("."):
-                        target = target[part]
-                    if field is None:
-                        target.clear()
-                        target.update(
-                            status="unknown",
-                            reason="mapping specification unavailable in this measurement",
-                        )
-                    else:
-                        target[field] = None
-                    result["provenance_quality"]["missing_fields"] = []
-                    result_path.write_text(json.dumps(result))
-                    with self.assertRaises(CatalogError):
-                        load_measurement(output.path)
-
-                    result["provenance_quality"]["missing_fields"] = [missing_name]
-                    result_path.write_text(json.dumps(result))
-                    self.assertEqual(load_measurement(output.path)["status"], "complete")
-            result_path.write_text(json.dumps(original))
-
-    def test_completed_record_rejects_empty_part_mapping_identity_even_with_gap(self):
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
-            output.set_candidates([])
-            output.finish(value=0.0, numerator=0, denominator=1)
-            result_path = output.path / "result.json"
-            result = json.loads(result_path.read_text())
-            result["protocol"]["parts"]["mapping_identity"] = {}
-            result["provenance_quality"]["missing_fields"] = ["parts.mapping_identity"]
-            result_path.write_text(json.dumps(result))
-            with self.assertRaisesRegex(CatalogError, "mapping identity"):
-                load_measurement(output.path)
-
-    def test_early_failed_record_does_not_require_completed_protocol_or_checkpoint_identity(self):
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output()
-            output.fail(RuntimeError("checkpoint failed before model loading"))
-            result_path = output.path / "result.json"
-            result = json.loads(result_path.read_text())
-            result["model"]["inputs"] = {}
-            result["protocol"] = {"version": 1, "metric": "consistency", "observation_columns": ["part_1"]}
-            result["provenance_quality"]["missing_fields"] = []
-            result_path.write_text(json.dumps(result))
-            self.assertEqual(load_measurement(output.path)["status"], "failed")
-
-    def test_explicit_unknown_provenance_is_valid_and_noise_seed_is_not_model_seed(self):
-        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            output = self.make_output(seed=41)
-            output.result["protocol"]["model"].update(epsilon=None)
-            output.result["protocol"]["parts"].update(
-                mapping_identity={"status": "unknown", "reason": "not available in this fixture"},
-                class_dependent_part_definitions=None,
-                annotation_provenance="unknown",
-            )
-            output.result["provenance_quality"]["missing_fields"].extend([
-                "model.epsilon",
-                "parts.mapping_identity",
-                "parts.class_dependent_part_definitions",
-                "parts.annotation_provenance",
-            ])
-            output.set_candidates([])
-            output.finish(value=0.0, numerator=0, denominator=1)
-            record = load_measurement(output.path)
-            self.assertNotIn("seed", record["model"])
-            self.assertIsNone(record["model"]["training_seed"])
-            self.assertEqual(record["parameters"]["seed"], 41)
-            self.assertIsNone(record["protocol"]["model"]["epsilon"])
-            self.assertEqual(record["protocol"]["parts"]["annotation_provenance"], "unknown")
-
-    def test_dataset_records_available_pascal_part_mapping_and_unknown_annotation_provenance(self):
+    def test_dataset_records_available_pascal_part_mapping(self):
         mapping_root = Path(self.temporary.name) / "pascal-source"
         mapping_root.mkdir()
         mapping_path = mapping_root / "parts.yaml"
@@ -538,22 +242,16 @@ class MetricCatalogTests(unittest.TestCase):
         )
         annotation_root = Path(self.temporary.name) / "pascal-processed" / "annotations" / "val"
         annotation_root.mkdir(parents=True)
-        dataset = type(
-            "Dataset",
-            (),
-            {"img_ids": ["one"], "annotations_dir": str(annotation_root)},
-        )()
-        with (
-            patch.dict(os.environ, {
-                "MEASUREMENT_CATALOG_ROOT": str(self.root),
-                "SOURCE_DATA_PATH_PASCAL": str(mapping_root),
-            }),
-        ):
+        dataset = type("Dataset", (), {"img_ids": ["one"], "annotations_dir": str(annotation_root)})()
+        with patch.dict(os.environ, {
+            "MEASUREMENT_CATALOG_ROOT": str(self.root),
+            "SOURCE_DATA_PATH_PASCAL": str(mapping_root),
+        }):
             output = self.make_output()
             output.record_dataset(dataset)
             parts = output.result["protocol"]["parts"]
             self.assertEqual(parts["mapping_identity"]["path"], str(mapping_path.resolve()))
-            self.assertEqual(parts["mapping_identity"]["status"], "available")
+            self.assertEqual(len(parts["mapping_identity"]["sha256"]), 64)
             self.assertEqual(
                 parts["class_dependent_part_definitions"]["person"],
                 {
@@ -562,13 +260,6 @@ class MetricCatalogTests(unittest.TestCase):
                     "countable_pid_groups": {"head": [1, 2]},
                 },
             )
-            self.assertEqual(parts["annotation_provenance"], "unknown")
-            self.assertEqual(
-                output.result["provenance_quality"]["warnings"].count(
-                    "The preprocessing provenance linking part annotations to the mapping is unknown."
-                ),
-                1,
-            )
 
     def test_dataset_provenance_collects_candidate_coverage(self):
         annotation_root = Path(self.temporary.name) / "processed" / "annotations" / "val"
@@ -576,59 +267,31 @@ class MetricCatalogTests(unittest.TestCase):
         parts_root = annotation_root.parent.parent / "annotations_PIDS" / annotation_root.name
         parts_root.mkdir(parents=True)
         (parts_root / "one.npy").write_bytes(b"part")
-        dataset = type(
-            "Dataset",
-            (),
-            {"img_ids": ["one", "two"], "annotations_dir": str(annotation_root)},
-        )()
+        dataset = type("Dataset", (), {"img_ids": ["one", "two"], "annotations_dir": str(annotation_root)})()
 
-        sample_ids, fields, parts, warnings, has_missing_parts = dataset_provenance(
-            dataset, "other", self.temporary.name, {}
-        )
+        sample_ids, fields, parts = dataset_provenance(dataset, "other", self.temporary.name, {})
 
         self.assertEqual(sample_ids, ["one", "two"])
         self.assertEqual(fields["candidate_count"], 2)
         self.assertEqual(fields["part_annotation_count"], 1)
-        self.assertEqual(fields["part_annotation_coverage"], 0.5)
-        self.assertTrue(has_missing_parts)
-        self.assertEqual(parts["annotation_provenance"], "unknown")
-        self.assertEqual(len(warnings), 3)
+        self.assertIsNone(parts["mapping_identity"])
 
     def test_loaded_model_runtime_is_added_to_protocol_not_model_seed(self):
-        model = type(
-            "Model",
-            (),
-            {"epsilon": 0.0007, "prototype_activation_function": "linear"},
-        )()
+        model = type("Model", (), {"epsilon": 0.0007, "prototype_activation_function": "linear"})()
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output(seed=41)
-            output.record_model_runtime(
-                model,
-                grouping_active=True,
-                excluded_evaluation_class_ids=[1, 5],
-            )
+            output.record_model_runtime(model, grouping_active=True, excluded_evaluation_class_ids=[1, 5])
             protocol = output.result["protocol"]
             self.assertEqual(protocol["model"]["epsilon"], 0.0007)
             self.assertEqual(protocol["model"]["prototype_activation_function"], "linear")
-            self.assertEqual(protocol["input"]["resolution"], "native cached image resolution; no metric resize before feature extraction")
-            self.assertEqual(protocol["input"]["normalization"]["mean"], [0.485, 0.456, 0.406])
             self.assertTrue(protocol["prototype_selection"]["grouping_active"])
-            self.assertIn("torch.nonzero(group_projection", protocol["prototype_selection"]["group_nonzero_rule"])
             self.assertNotIn("seed", output.result["model"])
             self.assertEqual(output.result["parameters"]["seed"], 41)
 
-    def test_unknown_runtime_model_attributes_are_recorded_as_explicit_unknowns(self):
-        model = MagicMock()
-        try:
-            with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-                output = self.make_output()
-                output.record_model_runtime(
-                    model,
-                    grouping_active=False,
-                    excluded_evaluation_class_ids=[],
-                )
-        except Exception:
-            self.fail("non-scalar model attributes must be recorded as unknown, not serialized recursively")
+    def test_non_scalar_runtime_model_attributes_are_recorded_as_null(self):
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            output.record_model_runtime(MagicMock(), grouping_active=False, excluded_evaluation_class_ids=[])
         self.assertIsNone(output.result["protocol"]["model"]["epsilon"])
         self.assertIsNone(output.result["protocol"]["model"]["prototype_activation_function"])
 
@@ -641,44 +304,47 @@ class MetricCatalogTests(unittest.TestCase):
             records = list(iter_measurements(self.root))
             self.assertEqual([record["measurement_id"] for record in records], [output.measurement_id])
 
-    def test_failed_processing_is_published_and_later_samples_stay_unattempted(self):
+    def test_failed_processing_is_published_with_partial_observations(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output()
             output.set_candidates(["first", "later"])
             output.start_sample("first")
+            output.add_observation(
+                sample_id="first", class_id=1, prototype_id=4, repetition=0, part_1=0, part_2=1, part_3=None,
+            )
             output.fail(RuntimeError("fixture failed"))
-            record = load_measurement(output.path)
+            record, rows = load_observations(output.path)
             self.assertEqual(record["status"], "failed")
+            self.assertEqual(record["failure"]["type"], "RuntimeError")
             self.assertEqual(record["population"]["failed"], 1)
-            with (output.path / "samples.csv").open(newline="") as stream:
-                rows = list(csv.DictReader(stream))
-            self.assertEqual([row["outcome"] for row in rows], ["failed", "not_attempted"])
+            self.assertEqual(record["population"]["not_attempted"], 1)
+            self.assertEqual(len(rows), 1)
 
     def test_failure_metadata_redacts_secret_like_values(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output()
-            output.set_candidates([])
             output.fail(RuntimeError("api_token=do-not-persist"))
             record = json.loads((output.path / "result.json").read_text())
             self.assertNotIn("do-not-persist", record["failure"]["message"])
             self.assertIn("[redacted]", record["failure"]["message"])
+            self.assertEqual(load_measurement(output.path)["artifacts"], {})
 
-    def test_duplicate_observation_keys_and_corrupt_artifacts_are_rejected(self):
+    def test_writer_rejects_invalid_observations_and_unattempted_completion(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output()
-            output.set_candidates(["sample"])
+            output.set_candidates(["sample", "pending"])
             output.start_sample("sample")
-            row = dict(
-                sample_id="sample", class_id=1, prototype_id=4, repetition=0,
-                part_1=0, part_2=1, part_3=None,
-            )
+            row = dict(sample_id="sample", class_id=1, prototype_id=4, repetition=0, part_1=0, part_2=1, part_3=None)
             output.add_observation(**row)
             with self.assertRaisesRegex(CatalogError, "Duplicate"):
                 output.add_observation(**row)
-            output.fail(ValueError("duplicate observation"))
-            (output.path / "observations.csv").write_text("corrupt\n")
-            with self.assertRaisesRegex(CatalogError, "byte size|hash"):
-                load_measurement(output.path)
+            with self.assertRaisesRegex(CatalogError, "zero, one, or unavailable"):
+                output.add_observation(**{**row, "repetition": 1, "part_1": 0.5})
+            with self.assertRaisesRegex(CatalogError, "outside the candidate population"):
+                output.add_observation(**{**row, "sample_id": "unknown"})
+            output.complete_sample("sample")
+            with self.assertRaisesRegex(CatalogError, "unattempted"):
+                output.finish(value=1.0, numerator=1, denominator=1)
 
     def test_terminal_records_cannot_be_modified(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
@@ -690,11 +356,8 @@ class MetricCatalogTests(unittest.TestCase):
 
     def test_concurrent_allocations_are_disjoint(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
-            def allocate(_):
-                return self.make_output().path
-
             with ThreadPoolExecutor(max_workers=8) as pool:
-                paths = list(pool.map(allocate, range(16)))
+                paths = list(pool.map(lambda _: self.make_output().path, range(16)))
             self.assertEqual(len(set(paths)), 16)
             self.assertTrue(all(path.parent == self.root / "measurements" for path in paths))
 

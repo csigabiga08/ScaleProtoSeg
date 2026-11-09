@@ -1,4 +1,4 @@
-"""Recompute versioned metric summaries from catalog observation rows."""
+"""Recompute metric summaries from catalog observation rows."""
 
 import math
 import re
@@ -11,13 +11,9 @@ class SummaryError(ValueError):
 
 _PART_COLUMN = re.compile(r"^part_(\d+)$")
 _NOISY_PART_COLUMN = re.compile(r"^noisy_part_(\d+)$")
-_CONSISTENCY_AGGREGATIONS = {
-    "unweighted mean over class/prototype rows",
-    "historical ScaleProtoSeg: unweighted mean over class/prototype rows",
-}
+_CONSISTENCY_AGGREGATIONS = {"unweighted mean over class/prototype rows"}
 _STABILITY_AGGREGATIONS = {
     "unweighted mean of exact all-part equality per paired sample/class/prototype row",
-    "historical ScaleProtoSeg: unweighted mean of exact all-part equality per paired sample/class/prototype row",
 }
 _CONSISTENCY_COMPARISONS = {
     "mean part presence > threshold",
@@ -36,14 +32,6 @@ def _protocol_info(result):
     protocol = result.get("protocol")
     if not isinstance(protocol, dict):
         raise SummaryError("Measurement has no protocol metadata")
-    version = protocol.get("version")
-    if result.get("origin") == "native" and version != 1:
-        raise SummaryError(f"Unsupported native protocol version: {version!r}")
-    if result.get("origin") == "legacy" and version not in (1, "scaleprotoseg-v1", "historical-scaleprotoseg-v1"):
-        raise SummaryError(f"Unsupported historical protocol version: {version!r}")
-    if result.get("origin") not in ("native", "legacy"):
-        raise SummaryError(f"Unsupported measurement origin: {result.get('origin')!r}")
-
     section = protocol.get(metric)
     if not isinstance(section, dict):
         raise SummaryError(f"Measurement has no {metric} protocol section")
@@ -51,8 +39,6 @@ def _protocol_info(result):
     expected = _CONSISTENCY_AGGREGATIONS if metric == "consistency" else _STABILITY_AGGREGATIONS
     if aggregation not in expected:
         raise SummaryError(f"Unsupported {metric} aggregation protocol: {aggregation!r}")
-    if isinstance(version, str) and not str(aggregation).startswith("historical ScaleProtoSeg:"):
-        raise SummaryError(f"Unsupported {metric} aggregation for historical protocol {version!r}")
     if metric == "consistency":
         comparison = section.get("strict_comparison")
         if comparison not in _CONSISTENCY_COMPARISONS:
@@ -212,10 +198,8 @@ def summarize_observations(result, observations):
         class_values = _class_summaries(prototypes, result)
         summary = {
             "measurement_id": result.get("measurement_id"),
-            "origin": result.get("origin"),
             "metric": metric,
             "status": result.get("status"),
-            "protocol_version": protocol.get("version"),
             "aggregation": metric_protocol["aggregation"],
             "quantile": protocol.get("quantile"),
             "threshold": threshold,
@@ -275,10 +259,8 @@ def summarize_observations(result, observations):
         denominator = len(stability_rows)
         summary = {
             "measurement_id": result.get("measurement_id"),
-            "origin": result.get("origin"),
             "metric": metric,
             "status": result.get("status"),
-            "protocol_version": protocol.get("version"),
             "aggregation": metric_protocol["aggregation"],
             "quantile": protocol.get("quantile"),
             "score": _score(numerator, denominator),
