@@ -346,6 +346,15 @@ read access. Start it from the repository root and forward the port over SSH:
   mean of run scores; `pooled` is Σ numerator / Σ denominator. Groups always include
   `metric`. The pivot's last column averages per-column means and is blank when a
   column value is missing for that row.
+- **Coverage**: choose one or more column dimensions and fix other inputs with
+  this view's filters. Every remaining input automatically becomes a row dimension.
+  Select candidate values or type additional values to generate the full Cartesian
+  grid, including entirely unmeasured rows. Cells retain individual scores and run
+  statuses; `null` is a missing score in an existing run, while `Not measured`
+  means no entry exists. This view includes all statuses and ignores sidebar
+  filters, but includes selected Extra fields. Download the matrix or a flat list
+  of missing configurations as CSV. Fix inputs or narrow values if the grid exceeds
+  100,000 cells; incompatible combinations are not automatically excluded.
 
 ## 🥇 Performance
 

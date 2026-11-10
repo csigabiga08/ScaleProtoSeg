@@ -3,6 +3,7 @@
 import json
 import math
 import os
+from itertools import product
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -20,6 +21,8 @@ IDENTITY_INPUTS = (
     "model.inputs.group_checkpoint.path",
 )
 SCORE_COLUMNS = ("score", "numerator", "denominator")
+NOT_MEASURED = "Not measured"
+MAX_COVERAGE_CELLS = 100_000
 # Large lookup tables that are identical per dataset and only clutter field pickers.
 EXCLUDED_PREFIXES = (
     "artifacts.",
@@ -175,6 +178,56 @@ def compare_flag(frame, flag, fields):
         [("", column) for column in by] + [("score", "Off"), ("score", "On")]
     )
     return result
+
+
+def coverage_matrix(frame, columns, values, fixed):
+    """Return the full configuration grid and absent configurations, without averaging.
+
+    ``values`` maps every non-fixed input to its selected candidate values. Inputs
+    not assigned to columns automatically become row dimensions.
+    """
+    columns = list(dict.fromkeys(columns))
+    if not columns or not set(columns) <= set(values) or set(values) & set(fixed):
+        raise ValueError("Choose column dimensions and keep fixed inputs separate from candidate values.")
+    if not set(input_columns(frame)) <= set(values) | set(fixed):
+        raise ValueError("Every input must have candidate values or a fixed value.")
+    values = {field: list(dict.fromkeys(candidates)) for field, candidates in values.items()}
+    if any(not candidates for candidates in values.values()):
+        raise ValueError("Select at least one candidate value for every dimension.")
+    rows = [field for field in values if field not in columns]
+    row_count = math.prod(len(values[field]) for field in rows)
+    column_count = math.prod(len(values[field]) for field in columns)
+    if row_count * column_count > MAX_COVERAGE_CELLS:
+        raise ValueError(
+            f"The grid has {row_count:,} rows × {column_count:,} score columns. "
+            f"Fix more inputs or narrow candidate values to at most {MAX_COVERAGE_CELLS:,} cells."
+        )
+    work = filter_frame(frame, {field: [value] for field, value in fixed.items()})
+    work = filter_frame(work, values)
+    dimensions = rows + columns
+    measured = {}
+    for key, group in work.groupby(dimensions, sort=False):
+        key = key if isinstance(key, tuple) else (key,)
+        scores = [None if pd.isna(value) else value for value in group["score"]]
+        measured[key] = json.dumps(scores) + " | " + ", ".join(group["status"])
+    column_values = list(product(*(values[field] for field in columns)))
+    headers = [("", field) for field in rows] + [
+        ("score", " | ".join(f"{field}={value}" for field, value in zip(columns, combination)))
+        for combination in column_values
+    ]
+    data, missing = [], []
+    for row_values in product(*(values[field] for field in rows)):
+        cells = list(row_values)
+        for combination in column_values:
+            key = row_values + combination
+            cells.append(measured.get(key, NOT_MEASURED))
+            if key not in measured:
+                missing.append({**fixed, **dict(zip(dimensions, key))})
+        data.append(cells)
+    return (
+        pd.DataFrame(data, columns=pd.MultiIndex.from_tuples(headers)),
+        pd.DataFrame(missing, columns=list(fixed) + dimensions),
+    )
 
 
 def aggregate(frame, by):

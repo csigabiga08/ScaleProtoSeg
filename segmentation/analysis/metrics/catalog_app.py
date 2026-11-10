@@ -21,8 +21,8 @@ def load(root, signature):
     return {record["measurement_id"]: record for record in records}, table.records_frame(records), errors
 
 
-def csv_download(frame, name, key):
-    st.download_button("Download CSV", frame.to_csv(index=False), f"{name}.csv", "text/csv", key=key)
+def csv_download(frame, name, key, label="Download CSV"):
+    st.download_button(label, frame.to_csv(index=False), f"{name}.csv", "text/csv", key=key)
 
 
 try:
@@ -66,7 +66,7 @@ fields = inputs + extras
 varying = table.varying_columns(view, fields)
 common = {column: view[column].iloc[0] for column in fields if column not in varying} if len(view) else {}
 
-runs_tab, compare_tab, aggregate_tab = st.tabs(["Runs", "Compare", "Aggregate"])
+runs_tab, compare_tab, aggregate_tab, coverage_tab = st.tabs(["Runs", "Compare", "Aggregate", "Coverage"])
 
 with runs_tab:
     st.caption(f"{len(view)} of {len(frame)} measurements")
@@ -154,3 +154,59 @@ with aggregate_tab:
         "and is blank when a value is missing."
     )
     csv_download(pivot, "pivot", "pivot_csv")
+
+with coverage_tab:
+    st.caption(
+        "Build a full configuration grid, including measurements that do not exist yet. "
+        "This view uses its own filters and all catalog statuses, independently of the sidebar filters. "
+        "Sidebar Extra fields are included as additional inputs."
+    )
+    coverage_columns = st.multiselect(
+        "Compare against (column dimensions)", fields,
+        default=["parameters.official_parts_only"] if "parameters.official_parts_only" in fields else [],
+        key="coverage_columns",
+    )
+    fixed_fields = st.multiselect(
+        "Fix inputs (filters)", [field for field in fields if field not in coverage_columns],
+        key="coverage_fixed_fields",
+    )
+    fixed = {}
+    for field in fixed_fields:
+        fixed[field] = st.selectbox(
+            f"Fixed value: {field}", sorted(frame[field].unique()),
+            accept_new_options=True, key=f"coverage_fixed_{field}",
+        )
+    candidates_frame = table.filter_frame(frame, {field: [value] for field, value in fixed.items()})
+    candidates = {}
+    with st.expander("Candidate values (select existing values or type additional values)", expanded=True):
+        for field in fields:
+            if field in fixed:
+                continue
+            observed = sorted(candidates_frame[field].unique())
+            options = sorted(frame[field].unique())
+            candidates[field] = st.multiselect(
+                f"{'Column' if field in coverage_columns else 'Row'} values: {field}",
+                options, default=observed or options, accept_new_options=True,
+                key=f"coverage_values_{field}",
+            )
+    st.caption(
+        "Every non-fixed input outside the column dimensions becomes a row dimension. "
+        "All selected values are crossed, even if a combination is incompatible. "
+        "Use lowercase true/false for flags and the catalog's exact text representation for other inputs."
+    )
+    if not coverage_columns:
+        st.info("Choose at least one column dimension.")
+    else:
+        try:
+            coverage, missing = table.coverage_matrix(frame, coverage_columns, candidates, fixed)
+        except ValueError as error:
+            st.warning(str(error))
+        else:
+            st.caption(
+                f"{len(coverage):,} configurations · {len(missing):,} unmeasured cells. "
+                "Cells list original scores and run statuses; null means an existing run has no score. "
+                "Not measured means no catalog entry exists."
+            )
+            st.dataframe(coverage, hide_index=True)
+            csv_download(coverage, "coverage", "coverage_csv", "Download coverage CSV")
+            csv_download(missing, "missing_measurements", "coverage_missing_csv", "Download missing configurations CSV")
