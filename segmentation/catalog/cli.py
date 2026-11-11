@@ -43,15 +43,10 @@ def _quantile(record):
 def _checkpoint_terms(record):
     model = record.get("model", {})
     parts = [model.get("label"), model.get("inputs", {})]
-    return " ".join(
-        str(value)
-        for value in parts
-        if value is not None
-    ).lower()
+    return " ".join(str(value) for value in parts if value is not None).lower()
 
 
-def _matches(record, *, metric=None, dataset=None, quantile=None, statuses=None,
-             checkpoint=None, variants=()):
+def _matches(record, *, metric=None, dataset=None, quantile=None, statuses=None, checkpoint=None, variants=()):
     if metric and record.get("metric") != metric:
         return False
     if dataset and _get_path(record, "dataset.name") != dataset:
@@ -79,8 +74,17 @@ def _matches(record, *, metric=None, dataset=None, quantile=None, statuses=None,
     return True
 
 
-def find_records(root=None, *, all_status=False, statuses=None, metric=None, dataset=None, quantile=None,
-                 checkpoint=None, variants=()):
+def find_records(
+    root=None,
+    *,
+    all_status=False,
+    statuses=None,
+    metric=None,
+    dataset=None,
+    quantile=None,
+    checkpoint=None,
+    variants=(),
+):
     """Read and filter only result.json files; do not open table/checkpoint payloads."""
     root = Path(root) if root is not None else configured_catalog_root()
     measurements = root / "measurements"
@@ -101,8 +105,13 @@ def find_records(root=None, *, all_status=False, statuses=None, metric=None, dat
             print(f"warning: skipping {bundle.name}: {error}", file=sys.stderr)
             continue
         if _matches(
-            record, metric=metric, dataset=dataset, quantile=quantile,
-            statuses=selected_statuses, checkpoint=checkpoint, variants=variants,
+            record,
+            metric=metric,
+            dataset=dataset,
+            quantile=quantile,
+            statuses=selected_statuses,
+            checkpoint=checkpoint,
+            variants=variants,
         ):
             records.append(record)
     return records
@@ -115,10 +124,15 @@ def find_measurement(root, measurement_id):
         raise CatalogError(f"Invalid measurement ID: {measurement_id!r}")
     bundle = root / "measurements" / measurement_id
     if not bundle.is_dir():
-        matches = [
-            path for path in (root / "measurements").iterdir()
-            if path.is_dir() and read_result(path / "result.json").get("measurement_id") == measurement_id
-        ] if (root / "measurements").is_dir() else []
+        matches = (
+            [
+                path
+                for path in (root / "measurements").iterdir()
+                if path.is_dir() and read_result(path / "result.json").get("measurement_id") == measurement_id
+            ]
+            if (root / "measurements").is_dir()
+            else []
+        )
         if len(matches) != 1:
             raise CatalogError(f"Measurement ID not found or ambiguous: {measurement_id}")
         bundle = matches[0]
@@ -152,6 +166,24 @@ def _command_parser():
     validate = commands.add_parser("validate", help="Validate selected metadata and canonical artifacts.")
     validate.add_argument("measurement_ids", nargs="*")
     validate.add_argument("--all-status", action="store_true")
+    commands.add_parser("architectures", help="Print source-defined architecture JSON schemas.")
+    commands.add_parser("list-models", help="List registered checkpoint metadata.")
+    register = commands.add_parser("register-model", help="Register one checkpoint; reject duplicate names or hashes.")
+    register.add_argument("--name", required=True)
+    register.add_argument("--architecture", required=True)
+    register.add_argument("--schema-version", type=int, default=1)
+    register.add_argument("--config", type=Path, required=True, help="Architecture configuration JSON file.")
+    register.add_argument("--dataset", required=True)
+    register.add_argument("--seed", type=int)
+    register.add_argument("--tags", default="{}", help="JSON object of universal string tags.")
+    register.add_argument("--checkpoint", required=True)
+    relocate = commands.add_parser("relocate-model", help="Update a location only if checkpoint contents match.")
+    relocate.add_argument("model")
+    relocate.add_argument("checkpoint")
+    commands.add_parser("migration-plan", help="Print a manifest requiring reviewed model references.")
+    migration = commands.add_parser("migrate", help="Validate a reviewed manifest; writes require --apply.")
+    migration.add_argument("manifest", type=Path)
+    migration.add_argument("--apply", action="store_true", help="Back up original metadata before rewriting it.")
     return parser
 
 
@@ -171,7 +203,55 @@ def main(argv=None):
     parser = _command_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "architectures":
+            from segmentation.catalog.architectures import ARCHITECTURES
+
+            print(
+                json.dumps(
+                    {
+                        f"{name}/{version}": schema.model_json_schema()
+                        for (name, version), schema in ARCHITECTURES.items()
+                    },
+                    indent=2,
+                )
+            )
+            return 0
         root = configured_catalog_root()
+        if args.command in ("list-models", "register-model", "relocate-model"):
+            from segmentation.catalog.models import list_models, register_model, relocate_model
+
+            if args.command == "list-models":
+                result = list_models(root)
+            elif args.command == "register-model":
+                result = register_model(
+                    root=root,
+                    name=args.name,
+                    architecture=args.architecture,
+                    schema_version=args.schema_version,
+                    config=read_result(args.config),
+                    dataset=args.dataset,
+                    seed=args.seed,
+                    tags=json.loads(args.tags),
+                    checkpoint=args.checkpoint,
+                )
+            else:
+                result = relocate_model(args.model, args.checkpoint, root)
+            print(json.dumps(result, indent=2))
+            return 0
+        if args.command in ("migration-plan", "migrate"):
+            from segmentation.catalog.migrate import migrate, migration_plan
+
+            result = (
+                migration_plan(root)
+                if args.command == "migration-plan"
+                else migrate(
+                    root,
+                    read_result(args.manifest),
+                    apply=args.apply,
+                )
+            )
+            print(json.dumps(result, indent=2))
+            return 0
         if args.command == "list":
             records = find_records(root, **_filters(args))
             print(json.dumps(records, indent=2, ensure_ascii=False, allow_nan=False))

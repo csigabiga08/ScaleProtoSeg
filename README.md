@@ -196,6 +196,7 @@ by `MEASUREMENT_CATALOG_ROOT`:
 
 ```text
 <catalog-root>/
+  models.sqlite3
   measurements/<measurement-uuid>/
     result.json
     observations.csv
@@ -204,7 +205,8 @@ by `MEASUREMENT_CATALOG_ROOT`:
 Set `MEASUREMENT_CATALOG_ROOT` in the job environment or in this checkout's ignored
 `.env` file. The root must already exist and be writable; metrics do not fall back
 to `RESULTS_DIR`, and there is no `--output-dir` or catalog-root command-line option.
-`RESULTS_DIR` still locates stage-selected checkpoints and relative group names.
+Measurement inputs must reference registered models; checkpoint paths and training
+stages are not metric overrides.
 Catalog configuration uses `python-dotenv` quoting, comments, and interpolation;
 an exported root takes precedence, and catalog lookup does not load other settings
 into the environment. Metadata validation uses Pydantic, pinned in both dependency
@@ -243,6 +245,40 @@ fields as bare Hydra `key=value` overrides (not positional arguments or `--` fla
 The following Pascal examples select exact evaluated checkpoints and a prototype
 filter checkpoint:
 
+### Registering checkpoints
+
+Architecture schemas live in `segmentation/catalog/architectures.py`, without
+importing model code or Torch. Add a versioned schema there for a new architecture;
+retain existing versions so old registrations stay readable. Print the schemas with
+`python -m segmentation.catalog.cli architectures`. Configs reject unknown fields.
+`ProtoSeg` requires `stage`; `ScaleProtoSeg` also requires the explicit `grouped`
+boolean. Optional backbone, prototype shape, scale/group counts describe known
+configuration, not guessed checkpoint-path conventions.
+
+Create a config JSON file, for example `{"stage": "push", "grouped": false}`, then:
+
+```bash
+python -m segmentation.catalog.cli register-model \
+  --name scaleproto-pascal --architecture ScaleProtoSeg --dataset pascal \
+  --config model-config.json --seed 0 --tags '{"experiment":"baseline"}' \
+  --checkpoint /absolute/path/to/push_last.pth
+python -m segmentation.catalog.cli list-models
+```
+
+Register the grouping checkpoint separately, with its own name and configuration.
+Registration assigns a UUID and enforces unique names and file SHA-256 hashes
+transactionally in SQLite, including concurrent registrations. Re-registering a
+copied checkpoint is rejected. Names are lowercase letters/digits plus `._-`, must
+start with a letter/digit, and cannot themselves be UUIDs. A training seed may be
+unknown (`null`, when omitted); tags are universal string values.
+
+Files are referenced, never moved or copied. After moving a file, use
+`python -m segmentation.catalog.cli relocate-model MODEL /new/checkpoint.pth`;
+its contents must match the registered hash. Both metric loaders verify contents.
+The webapp's **Registered models** section lists and registers checkpoints.
+Registration metadata and architecture-config fields are available as filters and
+grouping dimensions, separately from metric parameters.
+
 ### Pascal left/right part merging
 
 Set `merge_left_right_parts=true` for either metric to treat Pascal's 54
@@ -255,32 +291,31 @@ labels for all 54 pairs.
 
 ```bash
 python -m segmentation.analysis.metrics.consistency \
-  model_name=scaleproto_pascal training_phase=push data_type=pascal \
-  checkpoint=/data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
-  group_checkpoint=/data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal/checkpoints/th-0.05-nopush-group_last.pth \
+  model=scaleproto-pascal grouping_model=scaleproto-pascal-grouped data_type=pascal \
   quantile=0.8 threshold=0.8 require_semantic_match=true \
   exclude_background_centroid=true merge_left_right_parts=true
 
 python -m segmentation.analysis.metrics.stability \
-  model_name=scaleproto_pascal training_phase=push data_type=pascal \
-  checkpoint_path=/data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
-  group_checkpoint=/data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal/checkpoints/th-0.05-nopush-group_last.pth \
+  model=scaleproto-pascal grouping_model=scaleproto-pascal-grouped data_type=pascal \
   quantile=0.8 std_dev=0.2 seed=0 require_semantic_match=true \
   exclude_background_centroid=true merge_left_right_parts=true
 ```
 
-The common required overrides are `model_name`, `training_phase`, and `data_type`.
-Without an explicit checkpoint override, each calculator selects the checkpoint for
-that model and phase under `RESULTS_DIR`. Consistency uses `checkpoint=...` to select
-an exact evaluated checkpoint; stability uses `checkpoint_path=...`. Either accepts
-`group_checkpoint=...` for an exact prototype-filter checkpoint or `group_name=...`
-to resolve the existing group checkpoint under `RESULTS_DIR`. The metric-specific
+The common required overrides are `model` (UUID or unique name) and `data_type`.
+`grouping_model` optionally references another registered model for prototype
+selection; it may reference the main model itself, in which case it is loaded once.
+Omitting it means no group-based filtering, even if the main model has a projection.
+Datasets must match, and a grouping model must actually have a group projection.
+Measurements snapshot both registrations and their checkpoint identities.
+The metric-specific
 protocol values are also Hydra overrides: consistency accepts `quantile` and
 `threshold`, while stability accepts `quantile`, `std_dev`, and `seed` (default 0).
 Part selection and centroid behavior are controlled by `official_parts_only`,
 `require_semantic_match`, `exclude_background_centroid`, and
 `merge_left_right_parts`; set the applicable boolean to `true` as shown above.
 These options are recorded in the result protocol.
+`quantile_scope=class` is the default; `quantile_scope=image` reproduces historical
+whole-image experiments, with the scope explicitly recorded in parameters/protocol.
 Pascal semantic matching applies only to Pascal, and official-parts filtering applies
 only to Cityscapes. Output directories are allocated automatically from
 `MEASUREMENT_CATALOG_ROOT`.
@@ -290,6 +325,28 @@ Override the node with `sbatch --nodelist=maxitank ...` when using that node's c
 and preprocessed data. `/data_ssd` storage can differ between nodes: the updated code
 and configured caches must be available on the node you select. The result record's
 hostname and annotation paths identify which environment was used.
+
+### Migrating historical measurements
+
+Prepare, review and apply a manifest; no migration happens automatically:
+
+```bash
+python -m segmentation.catalog.cli migration-plan > migration.json
+# Register checkpoints, then fill model/grouping_model references in migration.json.
+python -m segmentation.catalog.cli migrate migration.json
+python -m segmentation.catalog.cli migrate migration.json --apply
+```
+
+The default is validation/dry-run only. Every historical grouping input requires
+a grouping-model reference. Where historical hashes are unavailable, each entry
+must explicitly set `confirm_historical_identity: true` after human verification;
+current file hashes are not proof of historical identity. Seeds are never parsed
+from paths. All entries are checked before rewriting; original `result.json` bytes
+are backed up under `backups/registration-<uuid>/` with an application receipt.
+An interrupted apply preserves all backups and records which entries were applied.
+Only metadata changes: observation bytes and scores remain untouched. Quantile scope
+and left/right merging are recovered from saved descriptions; original model
+metadata remains in `registration_migration`. Archived bundles are not selected.
 
 ### Querying the measurement catalog
 

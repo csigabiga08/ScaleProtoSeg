@@ -36,9 +36,6 @@ class MetricPlugin(ABC):
     def protocol_options(self, context):
         return {}
 
-    def implicit_grouping(self, run_input, model):
-        return False
-
     @abstractmethod
     def observe(self, output, variants, context):
         """Record one sample's ordered clean/noisy observation rows."""
@@ -70,17 +67,9 @@ def run_metric(run_input: MetricRunInput, metric: MetricPlugin):
         training_phase=run_input.training_phase,
         protocol=protocol,
         group_checkpoint=run_input.resolved_group_checkpoint_path,
-        **run_input.model_dump(
-            exclude={
-                "model_name",
-                "training_phase",
-                "data_type",
-                "group_name",
-                "group_checkpoint",
-                "checkpoint",
-                "checkpoint_path",
-            }
-        ),
+        model_ref=run_input.model,
+        grouping_model_ref=run_input.grouping_model,
+        **run_input.model_dump(exclude={"model", "grouping_model", "data_type"}),
     )
     try:
         noise_levels = metric.prepare(run_input)
@@ -106,13 +95,12 @@ def run_metric(run_input: MetricRunInput, metric: MetricPlugin):
                 output.register_input("group_checkpoint", run_input.resolved_checkpoint_path)
             else:
                 grouping_model = load_model_checkpoint(run_input.resolved_group_checkpoint_path)
+            if not hasattr(grouping_model, "group_projection"):
+                raise ValueError("The registered grouping model has no group projection")
             grouping_model.eval()
             prototype_ids = proto_filter(grouping_model)
-        elif metric.implicit_grouping(run_input, model):
-            prototype_ids = proto_filter(model)
-            output.register_input("group_checkpoint", run_input.resolved_checkpoint_path)
         output.set_selected_prototype_ids(selected_prototypes(model, prototype_ids, excluded_classes))
-        output.update_model_metadata(architecture=type(model).__name__)
+        output.update_model_metadata(runtime_class=type(model).__name__)
 
         dataset = PatchClassificationDataset(**context.dataset_options)
         output.record_dataset(dataset)
@@ -145,6 +133,7 @@ def run_metric(run_input: MetricRunInput, metric: MetricPlugin):
                     noise=noise,
                     exclude_background_centroid=run_input.exclude_background_centroid,
                     merge_left_right_parts=run_input.merge_left_right_parts,
+                    quantile_scope=run_input.quantile_scope,
                 )
                 variants.append(rows)
             metric.observe(output, variants, context)

@@ -1,8 +1,7 @@
-"""Checkpoint selection through the consistency CLI, without GPU inference."""
+"""Registered checkpoint selection, without GPU inference."""
 
-import os
-import inspect
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,18 +9,10 @@ from unittest.mock import MagicMock, call, patch
 
 from pydantic import ValidationError
 
-from segmentation.analysis.metrics import consistency, pipeline
+from segmentation.analysis.metrics import consistency, pipeline, stability
+from segmentation.analysis.metrics.protocol import ConsistencyRunInput, StabilityRunInput
 from segmentation.catalog import CatalogError
-from segmentation.analysis.metrics.protocol import ConsistencyRunInput
-
-
-def run_input(model_name="model", training_phase="push", data_type="pascal", **overrides):
-    return ConsistencyRunInput(
-        model_name=model_name,
-        training_phase=training_phase,
-        data_type=data_type,
-        **overrides,
-    )
+from segmentation.catalog.models import register_model
 
 
 class DatasetReached(Exception):
@@ -29,129 +20,99 @@ class DatasetReached(Exception):
 
 
 class ConsistencyCheckpointTests(unittest.TestCase):
-    def test_catalog_root_is_validated_before_model_loading(self):
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
-            root = Path(temporary)
-            checkpoint = root / "model" / "checkpoints" / "push_last.pth"
-            checkpoint.parent.mkdir(parents=True)
-            checkpoint.write_bytes(b"fixture checkpoint bytes")
-            with (
-                patch.dict(
-                    os.environ,
-                    {
-                        "RESULTS_DIR": str(root),
-                        "MEASUREMENT_CATALOG_ROOT": str(root / "missing-catalog"),
-                    },
-                ),
-                patch.object(pipeline, "load_model_checkpoint") as load,
-            ):
-                with self.assertRaises(CatalogError):
-                    consistency.run_consistency(run_input())
-                load.assert_not_called()
+    runners = (
+        (ConsistencyRunInput, consistency.run_consistency),
+        (StabilityRunInput, stability.run_stability),
+    )
 
-    def test_runner_input_rejects_unknown_fields(self):
-        self.assertNotIn("output_dir", inspect.signature(consistency.run_consistency).parameters)
-        with self.assertRaises(ValidationError):
-            run_input(output_dir="ignored")
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        env = patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.models = []
+        for name in ("main", "group"):
+            path = self.root / f"{name}.pth"
+            path.write_bytes(name.encode())
+            self.models.append(
+                register_model(
+                    root=self.root,
+                    name=name,
+                    architecture="ScaleProtoSeg",
+                    dataset="cityscapes",
+                    config={"stage": "push", "grouped": name == "group"},
+                    checkpoint=path,
+                )
+            )
 
-    def test_checkpoint_loading_failure_leaves_failed_initialization_record(self):
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
-            root = Path(temporary)
-            checkpoint = root / "model" / "checkpoints" / "push_last.pth"
-            checkpoint.parent.mkdir(parents=True)
-            checkpoint.write_bytes(b"fixture checkpoint bytes")
-            catalog_root = root / "catalog"
-            catalog_root.mkdir()
-            with (
-                patch.dict(
-                    os.environ,
-                    {
-                        "RESULTS_DIR": str(root),
-                        "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
-                    },
-                ),
-                patch.object(pipeline, "load_model_checkpoint", side_effect=ValueError("bad checkpoint")) as load,
-            ):
-                with self.assertRaisesRegex(ValueError, "bad checkpoint"):
-                    consistency.run_consistency(run_input())
-            load.assert_called_once_with(str(checkpoint))
-            bundles = list((catalog_root / "measurements").iterdir())
-            self.assertEqual(len(bundles), 1)
-            record = json.loads((bundles[0] / "result.json").read_text())
-            self.assertEqual(record["status"], "failed")
-            self.assertEqual(record["failure"]["type"], "ValueError")
-            self.assertEqual(record["population"], {"candidates": None, "contributing": 0, "observations": 0})
+    def test_registration_is_required_before_loading(self):
+        with patch.object(pipeline, "load_model_checkpoint") as load:
+            with self.assertRaises(CatalogError):
+                consistency.run_consistency(ConsistencyRunInput(model="absent", data_type="cityscapes"))
+            load.assert_not_called()
+        for field in ("checkpoint", "model_name", "training_phase", "group_checkpoint"):
+            with self.subTest(field=field), self.assertRaises(ValidationError):
+                ConsistencyRunInput(model="main", data_type="cityscapes", **{field: "raw"})
 
-    def test_checkpoint_selection_from_typed_input(self):
-        cases = [
-            ({}, False, ["model/checkpoints/push_last.pth"], None),
-            (
-                {"group_name": "group"},
-                False,
-                ["model/checkpoints/push_last.pth", "group/checkpoints/th-0.05-nopush-group_last.pth"],
-                "group",
-            ),
-            ({"checkpoint": "custom/best.pth"}, False, ["custom/best.pth"], None),
-            ({"checkpoint": "custom/best.pth"}, True, ["custom/best.pth"], "model"),
-            (
-                {"group_name": "group", "group_checkpoint": "custom/group.pth"},
-                False,
-                ["model/checkpoints/push_last.pth", "custom/group.pth"],
-                "group",
-            ),
-            (
-                {"checkpoint": "custom/best.pth", "group_checkpoint": "custom/group.pth"},
-                True,
-                ["custom/best.pth", "custom/group.pth"],
-                "group",
-            ),
-        ]
-        for overrides, grouped, paths, filter_source in cases:
-            with self.subTest(overrides=overrides, grouped=grouped), tempfile.TemporaryDirectory(
-                dir=Path.cwd()
-            ) as root:
-                root = Path(root)
-                overrides = dict(overrides)
-                catalog_root = root / "catalog"
-                catalog_root.mkdir()
-                for relative in (
-                    "model/checkpoints/push_last.pth",
-                    "group/checkpoints/th-0.05-nopush-group_last.pth",
-                    "custom/best.pth",
-                    "custom/group.pth",
-                ):
-                    checkpoint = root / relative
-                    checkpoint.parent.mkdir(parents=True, exist_ok=True)
-                    checkpoint.write_bytes(b"fixture checkpoint bytes")
-                for name in ("checkpoint", "group_checkpoint"):
-                    if name in overrides:
-                        overrides[name] = str(root / overrides[name])
-                paths = [str(root / path) if path.startswith("custom/") else path for path in paths]
+    def test_explicit_grouping_reference_and_same_model_role_reuse(self):
+        for input_type, runner in self.runners:
+            for group_reference in (None, "group", self.models[0]["model_id"]):
+                with self.subTest(metric=input_type.__name__, group=group_reference):
+                    model, group = MagicMock(), MagicMock()
+                    model.cuda.return_value = model
+                    with (
+                        patch.object(pipeline, "load_model_checkpoint", side_effect=[model, group]) as load,
+                        patch.object(pipeline, "proto_filter", return_value=[1]) as filtering,
+                        patch.object(pipeline, "PatchClassificationDataset", side_effect=DatasetReached),
+                    ):
+                        with self.assertRaises(DatasetReached):
+                            runner(
+                                input_type(
+                                    model="main",
+                                    grouping_model=group_reference,
+                                    data_type="cityscapes",
+                                )
+                            )
+                    expected = [call(self.models[0]["checkpoint"]["path"])]
+                    if group_reference == "group":
+                        expected.append(call(self.models[1]["checkpoint"]["path"]))
+                    self.assertEqual(load.call_args_list, expected)
+                    if group_reference is None:
+                        filtering.assert_not_called()
+                    else:
+                        filtering.assert_called_once_with(group if group_reference == "group" else model)
+
+    def test_grouping_projection_failures_are_recorded_for_both_metrics(self):
+        for input_type, runner in self.runners:
+            with self.subTest(metric=input_type.__name__):
                 model = MagicMock()
                 model.cuda.return_value = model
-                if not grouped:
-                    del model.group_projection
-                group = MagicMock()
                 with (
-                    patch.dict(
-                        os.environ,
-                        {
-                            "RESULTS_DIR": str(root),
-                            "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
-                        },
-                    ),
-                    patch.object(pipeline, "load_model_checkpoint", side_effect=[model, group]) as load,
-                    patch.object(pipeline, "proto_filter", return_value=[1]) as proto_filter,
-                    patch.object(pipeline, "PatchClassificationDataset", side_effect=DatasetReached),
+                    patch.object(pipeline, "load_model_checkpoint", side_effect=[model, object()]),
+                    patch.object(pipeline, "PatchClassificationDataset") as dataset,
                 ):
-                    with self.assertRaises(DatasetReached):
-                        consistency.run_consistency(run_input(data_type="cityscapes", **overrides))
-                    self.assertEqual(load.call_args_list, [call(os.path.join(root, p)) for p in paths])
-                    if filter_source is None:
-                        proto_filter.assert_not_called()
-                    else:
-                        proto_filter.assert_called_once_with(model if filter_source == "model" else group)
+                    with self.assertRaisesRegex(ValueError, "no group projection"):
+                        runner(input_type(model="main", grouping_model="group", data_type="cityscapes"))
+                dataset.assert_not_called()
+        records = [json.loads(path.read_text()) for path in (self.root / "measurements").glob("*/result.json")]
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(record["status"] == "failed" for record in records))
+        self.assertTrue(all(record["failure"]["type"] == "ValueError" for record in records))
 
+    def test_changed_weights_fail_before_model_loading(self):
+        Path(self.models[0]["checkpoint"]["path"]).write_bytes(b"modified")
+        with patch.object(pipeline, "load_model_checkpoint") as load:
+            with self.assertRaisesRegex(CatalogError, "changed"):
+                consistency.run_consistency(ConsistencyRunInput(model="main", data_type="cityscapes"))
+            load.assert_not_called()
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_loading_failure_leaves_failed_registered_measurement(self):
+        with patch.object(pipeline, "load_model_checkpoint", side_effect=ValueError("bad checkpoint")):
+            with self.assertRaisesRegex(ValueError, "bad checkpoint"):
+                consistency.run_consistency(ConsistencyRunInput(model="main", data_type="cityscapes"))
+        record = json.loads(next((self.root / "measurements").glob("*/result.json")).read_text())
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["model"]["registration_id"], self.models[0]["model_id"])
+        self.assertEqual(record["failure"]["type"], "ValueError")

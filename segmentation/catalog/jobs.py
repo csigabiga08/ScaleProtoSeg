@@ -26,50 +26,45 @@ BOOLEAN_PARAMETERS = {
 }
 
 
-def measurement_arguments(configuration, frame):
+def measurement_arguments(configuration, frame, root=None):
     """Translate a complete matrix cell to lossless, validated Hydra overrides."""
     metric = configuration.get("metric")
     if metric not in RUN_INPUTS:
         raise ValueError("Only consistency and stability measurements can be submitted.")
     input_type = RUN_INPUTS[metric]
-    parameters = BOOLEAN_PARAMETERS | {"quantile", "threshold", "std_dev", "seed"}
-    allowed = set(table.IDENTITY_INPUTS) | {PROTOTYPE_PATH} | {f"parameters.{name}" for name in parameters}
+    parameters = BOOLEAN_PARAMETERS | {"quantile", "quantile_scope", "threshold", "std_dev", "seed"}
+    allowed = set(table.input_columns(frame)) | {f"parameters.{name}" for name in parameters}
     for field in configuration:
         if field not in allowed:
             raise ValueError(f"{field} cannot be set by the metric runner; remove it from Extra fields.")
-    inputs = {}
-    for field, argument in (
-        ("model.label", "model_name"),
-        ("model.training_stage", "training_phase"),
-        ("dataset.name", "data_type"),
-    ):
-        value = configuration.get(field)
-        if not value or value == table.MISSING:
-            raise ValueError(f"Choose an explicit value for {field}.")
-        inputs[argument] = value
-    group = configuration.get("model.inputs.group_checkpoint.path", table.MISSING)
-    if group != table.MISSING:
-        inputs["group_checkpoint"] = str(Path(group).expanduser().resolve())
-        if inputs["group_checkpoint"] != group:
-            raise ValueError(f"Use the absolute group checkpoint path: {inputs['group_checkpoint']}")
-    checkpoint = configuration.get(PROTOTYPE_PATH)
-    if checkpoint is None:
-        references = table.filter_frame(
-            frame, {field: [configuration[field]] for field in ("model.label", "model.training_stage", "dataset.name")}
-        )
-        paths = set(references[PROTOTYPE_PATH]) - {table.MISSING} if PROTOTYPE_PATH in references else set()
-        if len(paths) != 1:
-            raise ValueError(
-                "No unique prototype checkpoint for this model/stage/dataset. "
-                f"Add {PROTOTYPE_PATH} through Extra fields and select its exact path."
-            )
-        checkpoint = paths.pop()
-    if not checkpoint or checkpoint == table.MISSING:
-        raise ValueError("An explicit prototype checkpoint is required.")
-    checkpoint_path = str(Path(checkpoint).expanduser().resolve())
-    if PROTOTYPE_PATH in configuration and checkpoint_path != checkpoint:
-        raise ValueError(f"Use the absolute prototype checkpoint path: {checkpoint_path}")
-    inputs["checkpoint" if metric == "consistency" else "checkpoint_path"] = checkpoint_path
+    from segmentation.catalog.models import model_snapshot
+    from segmentation.catalog.models import find_model
+
+    model_reference = configuration.get("model.registration_id")
+    if not model_reference or model_reference == table.MISSING:
+        raise ValueError("Select a registered model; migrate legacy measurements before submitting them.")
+    model = find_model(model_reference, root, verify=True)
+    group_reference = configuration.get("grouping_model.registration_id", table.MISSING)
+    grouping = find_model(group_reference, root, verify=True) if group_reference != table.MISSING else None
+    if grouping and grouping["dataset"] != model["dataset"]:
+        raise ValueError("Main and grouping models must use the same dataset.")
+    expected = table.flatten_record(
+        {
+            "model": model_snapshot(model),
+            "grouping_model": model_snapshot(grouping) if grouping else {},
+            "dataset": {"name": model["dataset"]},
+        }
+    )
+    for field, value in configuration.items():
+        if field == "metric" or field.startswith("parameters."):
+            continue
+        if value != table.display_value(expected.get(field)):
+            raise ValueError(f"{field} does not match the selected model registration.")
+    inputs = {
+        "model": model["model_id"],
+        "grouping_model": grouping["model_id"] if grouping else None,
+        "data_type": model["dataset"],
+    }
     for field, value in configuration.items():
         if not field.startswith("parameters."):
             continue
@@ -84,6 +79,8 @@ def measurement_arguments(configuration, frame):
             if value not in ("true", "false"):
                 raise ValueError(f"{field} must be true or false.")
             inputs[parameter] = value == "true"
+        elif parameter == "quantile_scope":
+            inputs[parameter] = value
         elif parameter == "seed":
             inputs[parameter] = int(value)
         else:
@@ -101,9 +98,6 @@ def measurement_arguments(configuration, frame):
             raise ValueError(f"{parameter} must be between 0 and 1.")
     if metric == "stability" and run_input.std_dev < 0:
         raise ValueError("std_dev must be nonnegative.")
-    for path in (run_input.resolved_checkpoint_path, run_input.resolved_group_checkpoint_path):
-        if path is not None and not Path(path).is_file():
-            raise ValueError(f"Checkpoint does not exist on this host: {path}")
     return [metric] + [
         f"{key}={json.dumps(value)}" for key, value in run_input.model_dump().items() if value is not None
     ]
@@ -177,7 +171,7 @@ def submit_measurement(configuration, checkout, root, python):
             raise ValueError("This configuration now has a catalog entry; reload Coverage.")
     else:
         raise ValueError("Catalog inputs changed; reload Coverage before submitting.")
-    arguments = measurement_arguments(configuration, fresh)
+    arguments = measurement_arguments(configuration, fresh, root=root)
     python = validate_runtime(python)
     node = current_slurm_node()
     checkout, root = Path(checkout).resolve(), Path(root).resolve()

@@ -12,63 +12,14 @@ from segmentation.data.pascal_parts import left_right_part_groups
 
 
 class MetricRunInputTests(unittest.TestCase):
-    def test_checkpoint_resolution_uses_override_or_results_dir_defaults(self):
-        with patch.dict(os.environ, {"RESULTS_DIR": "/results", "HOME": "/home/test"}):
-            consistency = ConsistencyRunInput(
-                model_name="model",
-                training_phase="push",
-                data_type="pascal",
-            )
-            stability = StabilityRunInput(
-                model_name="model",
-                training_phase="pruned",
-                data_type="pascal",
-            )
-            explicit_consistency = consistency.model_copy(update={"checkpoint": "~/custom.pth"})
-            explicit_stability = stability.model_copy(update={"checkpoint_path": "~/custom.pth"})
-
-            self.assertEqual(
-                consistency.resolved_checkpoint_path,
-                "/results/model/checkpoints/push_last.pth",
-            )
-            self.assertEqual(
-                stability.resolved_checkpoint_path,
-                "/results/model/pruned/checkpoints/push_last.pth",
-            )
-            self.assertEqual(
-                explicit_consistency.resolved_checkpoint_path,
-                "/home/test/custom.pth",
-            )
-            self.assertEqual(
-                explicit_stability.resolved_checkpoint_path,
-                "/home/test/custom.pth",
-            )
-
-            consistency_group = ConsistencyRunInput(
-                model_name="model",
-                training_phase="push",
-                data_type="pascal",
-                group_name="group",
-            )
-            explicit_group = StabilityRunInput(
-                model_name="model",
-                training_phase="push",
-                data_type="pascal",
-                group_checkpoint="~/custom-group.pth",
-            )
-            self.assertEqual(
-                consistency_group.resolved_group_checkpoint_path,
-                "/results/group/checkpoints/th-0.05-nopush-group_last.pth",
-            )
-            self.assertEqual(
-                explicit_group.resolved_group_checkpoint_path,
-                "/home/test/custom-group.pth",
-            )
+    def test_raw_checkpoint_arguments_are_rejected(self):
+        for input_type in (ConsistencyRunInput, StabilityRunInput):
+            with self.assertRaises(ValidationError):
+                input_type(model="registered", data_type="pascal", checkpoint="/raw.pth")
 
     def test_consistency_defaults_and_protocol_settings(self):
         run = ConsistencyRunInput(
-            model_name="model",
-            training_phase="push",
+            model="model",
             data_type="pascal",
         )
 
@@ -85,33 +36,35 @@ class MetricRunInputTests(unittest.TestCase):
             observation_columns=["part_0", "part_3"],
             excluded_evaluation_class_ids=[1, 5, 10, 12, 19],
         )
-        self.assertEqual(protocol, {
-            "metric": "consistency",
-            "quantile": 0.8,
-            "parts": {
-                "valid_part_ids": [9, 3],
-                "official_parts_only": False,
-                "require_semantic_match": False,
-                "exclude_background_centroid": False,
-                "merge_left_right_parts": False,
+        self.assertEqual(
+            protocol,
+            {
+                "metric": "consistency",
+                "quantile": 0.8,
+                "parts": {
+                    "valid_part_ids": [9, 3],
+                    "official_parts_only": False,
+                    "require_semantic_match": False,
+                    "exclude_background_centroid": False,
+                    "merge_left_right_parts": False,
+                },
+                "classes": {
+                    "semantic_id_to_evaluation_id": {1: 2},
+                    "evaluation_class_id_to_label": {"2": "cat"},
+                    "background_evaluation_class_id": 1,
+                    "excluded_evaluation_class_ids": [1, 5, 10, 12, 19],
+                },
+                "consistency": {
+                    "threshold": 0.8,
+                    "aggregation": "unweighted mean over class/prototype rows",
+                },
+                "observation_columns": ["part_0", "part_3"],
             },
-            "classes": {
-                "semantic_id_to_evaluation_id": {1: 2},
-                "evaluation_class_id_to_label": {"2": "cat"},
-                "background_evaluation_class_id": 1,
-                "excluded_evaluation_class_ids": [1, 5, 10, 12, 19],
-            },
-            "consistency": {
-                "threshold": 0.8,
-                "aggregation": "unweighted mean over class/prototype rows",
-            },
-            "observation_columns": ["part_0", "part_3"],
-        })
+        )
 
     def test_consistency_requires_explicit_excluded_class_ids(self):
         run = ConsistencyRunInput(
-            model_name="model",
-            training_phase="push",
+            model="model",
             data_type="pascal",
         )
 
@@ -125,8 +78,7 @@ class MetricRunInputTests(unittest.TestCase):
 
     def test_stability_defaults_and_protocol_settings(self):
         run = StabilityRunInput(
-            model_name="model",
-            training_phase="push",
+            model="model",
             data_type="cityscapes",
         )
 
@@ -149,33 +101,29 @@ class MetricRunInputTests(unittest.TestCase):
         self.assertFalse(protocol["parts"]["merge_left_right_parts"])
         self.assertEqual(protocol["classes"]["background_evaluation_class_id"], None)
         self.assertNotIn("excluded_evaluation_class_ids", protocol["classes"])
-        self.assertEqual(protocol["stability"], {
-            "standard_deviation": 0.2,
-            "seed": 0,
-            "aggregation": (
-                "unweighted mean of exact all-part equality per paired "
-                "sample/class/prototype row"
-            ),
-        })
         self.assertEqual(
-            protocol["observation_columns"], ["part_0", "noisy_part_0"]
+            protocol["stability"],
+            {
+                "standard_deviation": 0.2,
+                "seed": 0,
+                "aggregation": ("unweighted mean of exact all-part equality per paired " "sample/class/prototype row"),
+            },
         )
+        self.assertEqual(protocol["observation_columns"], ["part_0", "noisy_part_0"])
 
     def test_models_reject_unknown_keys(self):
         for model in (ConsistencyRunInput, StabilityRunInput):
             with self.subTest(model=model.__name__):
                 with self.assertRaises(ValidationError):
                     model(
-                        model_name="model",
-                        training_phase="push",
+                        model="model",
                         data_type="cityscapes",
                         unexpected=True,
                     )
 
     def test_models_reject_dataset_incompatible_flags(self):
         common = {
-            "model_name": "model",
-            "training_phase": "push",
+            "model": "model",
         }
         for model in (ConsistencyRunInput, StabilityRunInput):
             with self.subTest(model=model.__name__, flag="official_parts_only"):
@@ -202,8 +150,7 @@ class MetricRunInputTests(unittest.TestCase):
 
     def test_merged_part_groups_are_recorded_in_protocol(self):
         run = ConsistencyRunInput(
-            model_name="model",
-            training_phase="push",
+            model="model",
             data_type="pascal",
             merge_left_right_parts=True,
         )
@@ -236,12 +183,9 @@ class MetricRunInputTests(unittest.TestCase):
 
     def test_protocol_excludes_operational_model_and_checkpoint_values(self):
         run = ConsistencyRunInput(
-            model_name="private-model-name",
-            training_phase="push",
+            model="private-model-name",
             data_type="cityscapes",
-            checkpoint="/models/private/checkpoint.pth",
-            group_name="private-group",
-            group_checkpoint="/models/private/group.pth",
+            grouping_model="private-group",
         )
 
         protocol = run.to_protocol(

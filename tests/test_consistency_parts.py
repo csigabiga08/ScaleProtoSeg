@@ -2,6 +2,7 @@
 
 import json
 import os
+import csv
 from functools import partial
 from pathlib import Path
 import tempfile
@@ -15,21 +16,17 @@ import torch
 from PIL import Image
 from pydantic import ValidationError
 
+from registry_fixtures import registered_input
 from segmentation import constants
-from segmentation.analysis.metrics import consistency, helpers, pipeline
-from segmentation.analysis.metrics.protocol import ConsistencyRunInput
+from segmentation.analysis.metrics import consistency, helpers, pipeline, stability
+from segmentation.analysis.metrics.protocol import ConsistencyRunInput, StabilityRunInput
 from segmentation.data.cityscapes_parts import filter_official_parts
 
 part_intersect = partial(helpers.part_intersect, max_parts=constants.MAX_PARTS_PASCAL, missing_parts_nan=True)
 
 
 def run_input(model_name="model", training_phase="push", data_type="pascal", **overrides):
-    return ConsistencyRunInput(
-        model_name=model_name,
-        training_phase=training_phase,
-        data_type=data_type,
-        **overrides,
-    )
+    return registered_input(ConsistencyRunInput, model_name, training_phase, data_type, **overrides)
 
 
 def hydra_config_directory():
@@ -51,6 +48,99 @@ def prepare_run(root):
 
 
 class ConsistencyPartsTests(unittest.TestCase):
+    def test_pipeline_preserves_metric_specific_exclusions_and_missing_parts(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
+            root = Path(tmp)
+            catalog_root = prepare_run(root)
+            image_path = root / "sample.png"
+            Image.new("RGB", (2, 2)).save(image_path)
+            semantic = np.array([[5, 5], [2, 2]])
+            parts = np.ones_like(semantic)
+            dataset = MagicMock()
+            dataset.__len__.return_value = 1
+            dataset.img_ids = ["sample"]
+            dataset.get_img_path.return_value = str(image_path)
+            model = MagicMock()
+            model.cuda.return_value = model
+            model.epsilon = 1e-4
+            model.prototype_class_identity = torch.zeros((2, 21))
+            model.prototype_class_identity[0, 4] = 1
+            model.prototype_class_identity[1, 1] = 1
+            model.forward_from_conv_features.return_value = (
+                None,
+                torch.tensor([[[[0.1, 10.0], [10.0, 10.0]], [[10.0, 10.0], [0.1, 10.0]]]]),
+            )
+            with (
+                patch.dict(os.environ, {"RESULTS_DIR": str(root), "MEASUREMENT_CATALOG_ROOT": str(catalog_root)}),
+                patch.object(pipeline, "load_model_checkpoint", return_value=model),
+                patch.object(pipeline, "PatchClassificationDataset", return_value=dataset),
+                patch.object(pipeline, "load_part_annotations", return_value=(semantic, parts)),
+                patch.object(helpers, "to_normalized_tensor", return_value=torch.zeros((3, 2, 2))),
+                patch.object(torch.Tensor, "cuda", lambda self: self),
+            ):
+                consistency.run_consistency(run_input(quantile=0.0, exclude_background_centroid=True))
+                consistent_bundle, consistent = latest_record(catalog_root)
+                stability.run_stability(
+                    registered_input(
+                        StabilityRunInput,
+                        model_name="model",
+                        training_phase="push",
+                        data_type="pascal",
+                        quantile=0.0,
+                        std_dev=0.0,
+                        exclude_background_centroid=True,
+                    )
+                )
+                stable_bundle, stable = latest_record(catalog_root)
+            self.assertEqual(consistent["selected_prototype_ids"], [1])
+            self.assertEqual(stable["selected_prototype_ids"], [1, 0])
+            self.assertEqual(consistent["scores"]["consistency"]["value"], 1.0)
+            self.assertEqual(stable["scores"]["stability"]["value"], 1.0)
+            with (consistent_bundle / "observations.csv").open(newline="") as stream:
+                consistent_rows = list(csv.DictReader(stream))
+            with (stable_bundle / "observations.csv").open(newline="") as stream:
+                stable_rows = list(csv.DictReader(stream))
+            self.assertEqual({row["class_id"] for row in consistent_rows}, {"2"})
+            self.assertEqual({row["class_id"] for row in stable_rows}, {"2", "5"})
+            self.assertTrue(all(row["part_2"] == "" for row in consistent_rows))
+            self.assertTrue(all(row["part_2"] == "0" and row["noisy_part_2"] == "0" for row in stable_rows))
+
+    def test_explicit_image_quantile_scope_changes_the_threshold_region(self):
+        image = Image.new("RGB", (2, 2))
+        semantic = np.array([[2, 0], [0, 0]])
+        parts = np.array([[1, 0], [0, 0]])
+        model = MagicMock()
+        model.epsilon = 1e-4
+        model.prototype_class_identity = torch.tensor([[0, 1]])
+        model.forward_from_conv_features.return_value = (None, torch.tensor([[[[0.0, 10.0], [10.0, 10.0]]]]))
+        with (
+            patch.object(helpers, "to_normalized_tensor", return_value=torch.zeros((3, 2, 2))),
+            patch.object(torch.Tensor, "cuda", lambda self: self),
+        ):
+            _, class_rows = part_intersect(
+                image,
+                semantic,
+                parts,
+                model,
+                {1: "aeroplane"},
+                "sample",
+                0.8,
+                exclude_background_centroid=True,
+            )
+            _, image_rows = part_intersect(
+                image,
+                semantic,
+                parts,
+                model,
+                {1: "aeroplane"},
+                "sample",
+                0.8,
+                exclude_background_centroid=True,
+                quantile_scope="image",
+            )
+        self.assertEqual(class_rows[0][1], 0)
+        self.assertEqual(image_rows[0][1], 1)
+
     def test_official_taxonomy(self):
         sids, pids = np.meshgrid(np.arange(35), np.arange(-1, 100), indexing="ij")
         expected = np.full_like(pids, -1)
@@ -130,8 +220,7 @@ class ConsistencyPartsTests(unittest.TestCase):
             config = compose(
                 config_name="consistency",
                 overrides=[
-                    "model_name=network",
-                    "training_phase=push",
+                    "model=network",
                     "data_type=pascal",
                     "quantile=0.7",
                     "threshold=0.9",
@@ -145,8 +234,7 @@ class ConsistencyPartsTests(unittest.TestCase):
         runner.assert_called_once()
         model = runner.call_args.args[0]
         self.assertIsInstance(model, ConsistencyRunInput)
-        self.assertEqual(model.model_name, "network")
-        self.assertEqual(model.training_phase, "push")
+        self.assertEqual(model.model, "network")
         self.assertEqual(model.data_type, "pascal")
         self.assertEqual(model.quantile, 0.7)
         self.assertEqual(model.threshold, 0.9)
@@ -174,8 +262,7 @@ class ConsistencyPartsTests(unittest.TestCase):
                 "sys.argv",
                 [
                     "consistency",
-                    "model_name=network",
-                    "training_phase=push",
+                    "model=network",
                     "data_type=pascal",
                 ],
             ),
@@ -192,8 +279,7 @@ class ConsistencyPartsTests(unittest.TestCase):
                 compose(
                     config_name="consistency",
                     overrides=[
-                        "model_name=network",
-                        "training_phase=push",
+                        "model=network",
                         "data_type=pascal",
                         "unknown_option=true",
                     ],

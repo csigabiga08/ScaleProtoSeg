@@ -4,7 +4,6 @@ from typing import Annotated, Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, StringConstraints, model_validator
 
-
 Text = Annotated[str, StringConstraints(min_length=1, pattern=r"\S")]
 
 
@@ -33,6 +32,12 @@ class Score(Metadata):
 
 
 class ModelMetadata(Metadata):
+    registration_id: Text
+    name: Text
+    schema_version: int
+    config: dict
+    seed: Optional[int]
+    tags: dict[str, str]
     label: Text
     training_stage: Text
     dataset: Text
@@ -76,9 +81,7 @@ class Measurement(Metadata):
 
     @model_validator(mode="after")
     def complete(self):
-        if self.status == "complete" and (
-            self.metric not in self.scores or "observations" not in self.artifacts
-        ):
+        if self.status == "complete" and (self.metric not in self.scores or "observations" not in self.artifacts):
             raise ValueError("a complete measurement needs its score and observations artifact")
         return self
 
@@ -87,6 +90,7 @@ class MeasurementOutput(Measurement):
     """Typed native record emitted by MetricOutput."""
 
     model: ModelMetadata
+    grouping_model: Optional[ModelMetadata] = None
     dataset: DatasetMetadata
     execution: ExecutionMetadata
     population: Optional[Population] = None

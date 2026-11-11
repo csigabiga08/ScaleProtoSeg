@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from segmentation import constants
 from segmentation.analysis.metrics import helpers, pipeline, stability
 from segmentation.analysis.metrics.protocol import StabilityRunInput
+from registry_fixtures import registered_input
 
 part_intersect = partial(helpers.part_intersect, max_parts=constants.MAX_PARTS_PASCAL, missing_parts_nan=False)
 
@@ -31,7 +32,8 @@ def latest_record(root):
 
 class StabilityPartsTests(unittest.TestCase):
     def test_stability_serializer_preserves_existing_protocol_and_columns(self):
-        run = StabilityRunInput(
+        run = registered_input(
+            StabilityRunInput,
             model_name="model",
             training_phase="push",
             data_type="pascal",
@@ -102,8 +104,7 @@ class StabilityPartsTests(unittest.TestCase):
             config = compose(
                 config_name="stability",
                 overrides=[
-                    "model_name=test-model",
-                    "training_phase=push",
+                    "model=test-model",
                     "data_type=pascal",
                     "std_dev=0.35",
                     "seed=41",
@@ -115,8 +116,7 @@ class StabilityPartsTests(unittest.TestCase):
 
         run_input = runner.call_args.args[0]
         self.assertIsInstance(run_input, StabilityRunInput)
-        self.assertEqual(run_input.model_name, "test-model")
-        self.assertEqual(run_input.training_phase, "push")
+        self.assertEqual(run_input.model, "test-model")
         self.assertEqual(run_input.data_type, "pascal")
         self.assertEqual(run_input.std_dev, 0.35)
         self.assertEqual(run_input.seed, 41)
@@ -128,8 +128,7 @@ class StabilityPartsTests(unittest.TestCase):
             config = compose(
                 config_name="stability",
                 overrides=[
-                    "model_name=test-model",
-                    "training_phase=push",
+                    "model=test-model",
                     "data_type=cityscapes",
                 ],
             )
@@ -142,8 +141,7 @@ class StabilityPartsTests(unittest.TestCase):
                 compose(
                     config_name="stability",
                     overrides=[
-                        "model_name=test-model",
-                        "training_phase=push",
+                        "model=test-model",
                         "data_type=cityscapes",
                         "unexpected_field=true",
                     ],
@@ -152,8 +150,7 @@ class StabilityPartsTests(unittest.TestCase):
             config_with_unknown_field = compose(
                 config_name="stability",
                 overrides=[
-                    "model_name=test-model",
-                    "training_phase=push",
+                    "model=test-model",
                     "data_type=cityscapes",
                     "+unexpected_field=true",
                 ],
@@ -183,7 +180,8 @@ class StabilityPartsTests(unittest.TestCase):
             ["run_input"],
         )
         with self.assertRaises(ValidationError):
-            StabilityRunInput(
+            registered_input(
+                StabilityRunInput,
                 model_name="model",
                 training_phase="push",
                 data_type="pascal",
@@ -298,12 +296,14 @@ class StabilityPartsTests(unittest.TestCase):
             dataset.get_img_path.return_value = str(image_path)
             observation = [0] * (constants.MAX_PARTS_PASCAL + 1) + [0, "aeroplane", "sample"]
             checkpoint = root / "model" / "checkpoints" / "nopush_best.pth"
-            run_input = StabilityRunInput(
-                model_name="model",
-                training_phase="nopush",
-                data_type="pascal",
-                checkpoint_path=str(checkpoint),
-            )
+            with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(catalog_root)}):
+                run_input = registered_input(
+                    StabilityRunInput,
+                    model_name="model",
+                    training_phase="nopush",
+                    data_type="pascal",
+                    checkpoint_path=str(checkpoint),
+                )
             with (
                 patch.dict(
                     os.environ,

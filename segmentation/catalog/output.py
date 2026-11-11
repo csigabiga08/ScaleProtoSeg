@@ -26,6 +26,7 @@ from segmentation.catalog.schema import (
     Population,
     Score,
 )
+from segmentation.catalog.models import find_model, model_snapshot
 
 
 def _file_identity(path):
@@ -37,8 +38,12 @@ def _file_identity(path):
 def _git_commit():
     try:
         return subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parent,
-            capture_output=True, text=True, timeout=10, check=True,
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return None
@@ -82,9 +87,23 @@ class MetricOutput:
         training_phase,
         protocol,
         group_checkpoint=None,
+        model_ref=None,
+        grouping_model_ref=None,
         **parameters,
     ):
         self.root = resolve_catalog_root()
+        if model_ref is None or (group_checkpoint is not None and grouping_model_ref is None):
+            raise CatalogError("Model and grouping checkpoints must be registered and explicitly referenced")
+        registration = find_model(model_ref, self.root, verify=True)
+        grouping = find_model(grouping_model_ref, self.root, verify=True) if grouping_model_ref else None
+        if registration["dataset"] != data_type or (grouping and grouping["dataset"] != data_type):
+            raise CatalogError("Registered model datasets must match the measurement dataset")
+        if str(Path(checkpoint).expanduser().resolve()) != registration["checkpoint"]["path"]:
+            raise CatalogError("Checkpoint does not match the referenced model registration")
+        if (str(Path(group_checkpoint).expanduser().resolve()) if group_checkpoint is not None else None) != (
+            grouping["checkpoint"]["path"] if grouping else None
+        ):
+            raise CatalogError("Grouping checkpoint does not match its model registration")
         measurements = self.root / "measurements"
         while True:
             self.measurement_id = str(uuid.uuid4())
@@ -119,12 +138,12 @@ class MetricOutput:
             created_at_utc=_now(),
             completed_at_utc=None,
             model=ModelMetadata(
-                label=model_name,
-                training_stage=training_phase,
-                dataset=self.data_type,
-                architecture=None,
-                inputs={role: Artifact(**identity) for role, identity in inputs.items()},
+                **{
+                    **model_snapshot(registration),
+                    "inputs": {role: Artifact(**identity) for role, identity in inputs.items()},
+                }
             ),
+            grouping_model=ModelMetadata(**model_snapshot(grouping)) if grouping else None,
             dataset=DatasetMetadata(name=self.data_type, split="val"),
             protocol=protocol,
             parameters=_json_value(parameters),
@@ -171,7 +190,11 @@ class MetricOutput:
 
     def register_input(self, role, path):
         self._ensure_running()
-        self.result.model.inputs[role] = Artifact(**_file_identity(path))
+        identity = Artifact(**_file_identity(path))
+        registered = self.result.model.inputs.get(role)
+        if registered is None or (registered.sha256, registered.bytes) != (identity.sha256, identity.bytes):
+            raise CatalogError("Additional model inputs must match an explicitly referenced registration")
+        self.result.model.inputs[role] = identity
         self._write_result()
 
     def update_model_metadata(self, **fields):
