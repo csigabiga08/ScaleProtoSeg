@@ -12,8 +12,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from segmentation.analysis.metrics import catalog_cli
-from segmentation.analysis.metrics.catalog import CatalogError, load_observations
+from segmentation.catalog import cli as catalog_cli
+from segmentation.catalog import CatalogError, load_observations
 
 
 CONSISTENCY_PROTOCOL = {

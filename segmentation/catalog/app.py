@@ -1,7 +1,7 @@
 """Streamlit browser and Slurm launcher for the metric measurement catalog.
 
 Run from the repository root:
-    python -m streamlit run segmentation/analysis/metrics/catalog_app.py
+    python -m streamlit run segmentation/catalog/app.py
 """
 
 import hashlib
@@ -13,10 +13,10 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from segmentation.analysis.metrics import catalog_jobs as jobs
-from segmentation.analysis.metrics import catalog_table as table
-from segmentation.analysis.metrics.catalog import CatalogError, load_observations
-from segmentation.analysis.metrics.catalog_cli import validate_measurement
+from segmentation.catalog import jobs as jobs
+from segmentation.catalog import table as table
+from segmentation.catalog import CatalogError, load_observations
+from segmentation.catalog.cli import validate_measurement
 
 st.set_page_config(page_title="Measurement catalog", layout="wide")
 
@@ -233,7 +233,7 @@ with coverage_tab:
                 key=f"coverage_missing_{selection_key}",
             )
             chosen = missing.iloc[missing_event.selection.rows].to_dict("records")
-            checkout = Path(__file__).resolve().parents[3]
+            checkout = Path(__file__).resolve().parents[2]
             python = st.text_input(
                 "Evaluation Python executable",
                 value=os.environ.get("METRIC_PYTHON", str(checkout / ".venv/bin/python")),

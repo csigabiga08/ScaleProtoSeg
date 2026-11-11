@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sys
 
-from segmentation.analysis.metrics.catalog import (
+from segmentation.catalog import (
     CatalogError,
     load_measurement,
     read_result,

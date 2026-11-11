@@ -9,7 +9,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 import pandas as pd
 
-from segmentation.analysis.metrics.catalog import CatalogError, read_result, validate_result
+from segmentation.catalog import CatalogError, read_result, validate_result
 
 
 MISSING = "∅"
@@ -34,7 +34,7 @@ EXCLUDED_PREFIXES = (
 
 def read_catalog_root(checkout=None):
     """Resolve MEASUREMENT_CATALOG_ROOT like the writers do, but require read access only."""
-    checkout = Path(checkout) if checkout is not None else Path(__file__).resolve().parents[3]
+    checkout = Path(checkout) if checkout is not None else Path(__file__).resolve().parents[2]
     configured = os.environ.get("MEASUREMENT_CATALOG_ROOT") or dotenv_values(checkout / ".env").get(
         "MEASUREMENT_CATALOG_ROOT"
     )

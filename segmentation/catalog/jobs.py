@@ -10,7 +10,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from segmentation.analysis.metrics import catalog_table as table
+from segmentation.catalog import table as table
 from segmentation.analysis.metrics.protocol import (
     ConsistencyRunInput,
     StabilityRunInput,

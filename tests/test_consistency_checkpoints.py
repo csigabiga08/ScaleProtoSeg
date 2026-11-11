@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, call, patch
 from pydantic import ValidationError
 
 from segmentation.analysis.metrics import consistency
-from segmentation.analysis.metrics.catalog import CatalogError
+from segmentation.catalog import CatalogError
 from segmentation.analysis.metrics.protocol import ConsistencyRunInput
 
 

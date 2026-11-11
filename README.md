@@ -304,7 +304,7 @@ List complete measurements without opening observation tables, checkpoints, or
 model code:
 
 ```bash
-.venv/bin/python -m segmentation.analysis.metrics.catalog_cli list \
+.venv/bin/python -m segmentation.catalog.cli list \
   --metric consistency --dataset pascal --quantile 0.8 \
   --variant protocol.consistency.threshold=0.8
 ```
@@ -315,7 +315,7 @@ non-complete status filters also require that opt-in.
 Validate a record or all selected records:
 
 ```bash
-.venv/bin/python -m segmentation.analysis.metrics.catalog_cli validate <measurement-id>
+.venv/bin/python -m segmentation.catalog.cli validate <measurement-id>
 ```
 
 `validate` checks metadata, the observations artifact size and hash, and the
@@ -329,7 +329,7 @@ read access; launching jobs also needs write access. Start it from the repositor
 root and forward the port over SSH:
 
 ```bash
-.venv/bin/python -m streamlit run segmentation/analysis/metrics/catalog_app.py \
+.venv/bin/python -m streamlit run segmentation/catalog/app.py \
   --server.headless true --server.port 8501
 ```
 

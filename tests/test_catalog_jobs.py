@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from segmentation.analysis.metrics import catalog_jobs as jobs
-from segmentation.analysis.metrics import catalog_table as table
+from segmentation.catalog import jobs as jobs
+from segmentation.catalog import table as table
 
 
 class CatalogJobsTest(unittest.TestCase):

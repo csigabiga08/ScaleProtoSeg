@@ -17,7 +17,7 @@ from tqdm import tqdm
 from find_nearest import to_normalized_tensor
 from segmentation.analysis.equivariance import quantile_map
 from segmentation.analysis.metrics.helpers import proto_filter, selected_prototypes
-from segmentation.analysis.metrics.output import MetricOutput
+from segmentation.catalog.output import MetricOutput
 from segmentation.analysis.metrics.protocol import ConsistencyRunInput
 from segmentation.checkpoints import load_model_checkpoint
 from segmentation.constants import (

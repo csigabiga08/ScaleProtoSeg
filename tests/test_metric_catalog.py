@@ -12,15 +12,15 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-from segmentation.analysis.metrics.catalog import (
+from segmentation.catalog import (
     CatalogError,
     iter_measurements,
     load_measurement,
     load_observations,
     resolve_catalog_root,
 )
-from segmentation.analysis.metrics.output import MetricOutput
-from segmentation.analysis.metrics.schema import MeasurementOutput
+from segmentation.catalog.output import MetricOutput
+from segmentation.catalog.schema import MeasurementOutput
 
 
 class MetricCatalogTests(unittest.TestCase):
@@ -82,7 +82,7 @@ class MetricCatalogTests(unittest.TestCase):
                 resolve_catalog_root(checkout=Path(self.temporary.name))
         with (
             patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}),
-            patch("segmentation.analysis.metrics.catalog.os.access", return_value=False),
+            patch("segmentation.catalog.os.access", return_value=False),
         ):
             with self.assertRaisesRegex(CatalogError, "not writable"):
                 resolve_catalog_root(checkout=Path(self.temporary.name))
@@ -102,7 +102,7 @@ class MetricCatalogTests(unittest.TestCase):
     def test_helpers_import_without_torch_or_settings(self):
         code = (
             "import sys; "
-            "from segmentation.analysis.metrics import catalog, output; "
+            "from segmentation import catalog; from segmentation.catalog import output; "
             "assert 'torch' not in sys.modules; "
             "assert 'settings' not in sys.modules"
         )

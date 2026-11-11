@@ -10,13 +10,13 @@ import subprocess
 import sys
 import uuid
 
-from segmentation.analysis.metrics.catalog import (
+from segmentation.catalog import (
     CatalogError,
     OBSERVATION_KEY,
     resolve_catalog_root,
     sha256_file,
 )
-from segmentation.analysis.metrics.schema import (
+from segmentation.catalog.schema import (
     Artifact,
     DatasetMetadata,
     ExecutionMetadata,
