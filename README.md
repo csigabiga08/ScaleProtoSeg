@@ -321,6 +321,32 @@ Validate a record or all selected records:
 `validate` checks metadata, the observations artifact size and hash, and the
 population counts against the rows.
 
+### Browsing the measurement catalog
+
+A read-only Streamlit app (evaluation profile) inspects, filters, compares and
+aggregates the catalog. It reads the same `MEASUREMENT_CATALOG_ROOT` but needs only
+read access. Start it from the repository root and forward the port over SSH:
+
+```bash
+.venv/bin/python -m streamlit run segmentation/analysis/metrics/catalog_app.py \
+  --server.headless true --server.port 8501
+```
+
+- **Runs**: one row per measurement; sidebar filters cover the inputs (model, stage,
+  group checkpoint and every recorded `parameters.*` value), and *Extra fields* adds
+  any other varying `result.json` field. Select one row for its metadata, observations
+  and hash validation.
+- **Compare**: choose a boolean flag to find catalog entry pairs where every other
+  input (including quantile) and selected extra field matches. The score has
+  **Off**/**On** sub-columns containing lists of the original scores, preserving
+  duplicate entries and missing scores without averaging. Only configurations
+  present on both sides are shown, using the filtered runs.
+- **Aggregate**: group by chosen inputs and average over the rest (e.g. leave
+  `parameters.quantile` out to average across quantiles). `mean` is the unweighted
+  mean of run scores; `pooled` is Σ numerator / Σ denominator. Groups always include
+  `metric`. The pivot's last column averages per-column means and is blank when a
+  column value is missing for that row.
+
 ## 🥇 Performance
 
 On the validation sets, we report the results over 3 runs, while for the test sets, the results are based on [ProtoSeg](https://arxiv.org/abs/2301.12276) and our best ScaleProtoSeg validation run.
