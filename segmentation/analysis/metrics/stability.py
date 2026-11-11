@@ -4,18 +4,16 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import cv2
 import hydra
 import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
 from omegaconf import DictConfig, OmegaConf
-from torchvision import transforms
 from tqdm import tqdm
 
 from find_nearest import to_normalized_tensor
-from segmentation.analysis.equivariance import quantile_map
+from segmentation.analysis.metrics.common import EvaluationContext, load_part_annotations, part_intersections
 from segmentation.analysis.metrics.helpers import proto_filter, selected_prototypes
 from segmentation.catalog.output import MetricOutput
 from segmentation.analysis.metrics.protocol import StabilityRunInput
@@ -29,8 +27,7 @@ from segmentation.constants import (
     PASCAL_ID_MAPPING,
 )
 from segmentation.data.dataset import PatchClassificationDataset
-from segmentation.data.cityscapes_parts import filter_official_parts
-from segmentation.data.pascal_parts import left_right_part_groups, merge_left_right_presence
+from segmentation.data.pascal_parts import left_right_part_groups
 from segmentation.model.model import PPNet
 from segmentation.model.model_multiscale_group import PPNetMultiScale
 from settings import log
@@ -95,23 +92,10 @@ def run_stability(run_input: StabilityRunInput):
 
     global MAX_PARTS
 
-    if data_type == "cityscapes":  # TODO: Potentially adapt to new mapping
-
-        ID_MAPPING = CITYSCAPES_19_EVAL_CATEGORIES
-        CATEGORIES = CITYSCAPES_CATEGORIES
-        MAX_PARTS = MAX_PARTS_CITY
-        pred2name = {k - 1: i for i, k in ID_MAPPING.items() if k > 0}
-        cls2name = {i: CATEGORIES[k] for i, k in pred2name.items()}
-
-    elif data_type == "pascal":
-        ID_MAPPING = PASCAL_ID_MAPPING
-        CATEGORIES = PASCAL_CATEGORIES
-        MAX_PARTS = MAX_PARTS_PASCAL
-        pred2name = {k - 1: i for i, k in ID_MAPPING.items() if k > 0}
-        cls2name = {i: CATEGORIES[k + 1] for i, k in pred2name.items() if k < len(CATEGORIES) - 1}
-
-    else:
-        raise NotImplementedError(f"Data type {data_type} not supported")
+    context = EvaluationContext.for_dataset(data_type)
+    ID_MAPPING = context.semantic_ids
+    cls2name = context.class_labels
+    MAX_PARTS = context.max_parts
 
     checkpoint_path_group = run_input.resolved_group_checkpoint_path
 
@@ -164,18 +148,7 @@ def run_stability(run_input: StabilityRunInput):
         output.set_selected_prototype_ids(selected_prototypes(ppnet, proto_ids))
         output.update_model_metadata(architecture=type(ppnet).__name__)
 
-        val_dataset = PatchClassificationDataset(  # TODO: Adapt to new dataset
-            data_type=data_type,
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-            image_margin_size=0,
-            window_size=(513, 513),
-            only_19_from_cityscapes=(data_type == "cityscapes"),
-            scales=(0.5, 1.5),
-            split_key="val",
-            is_eval=True,
-            push_prototypes=True,
-        )
+        val_dataset = PatchClassificationDataset(**context.dataset_options)
 
         output.record_dataset(val_dataset)
         tot_presence = []
@@ -188,26 +161,10 @@ def run_stability(run_input: StabilityRunInput):
             img_id = val_dataset.img_ids[sample_index]
             img_path = val_dataset.get_img_path(img_id)
 
-            path_cls = Path(val_dataset.annotations_dir)
-            path_part = str(path_cls.parent) + f"_PIDS/{path_cls.name}"
-
-            # Pascal parts cover only a subset of the validation images.
-            if not os.path.exists(os.path.join(path_part, img_id + ".npy")):
+            annotations = load_part_annotations(val_dataset, img_id, run_input)
+            if annotations is None:
                 continue
-
-            part_ann = np.load(os.path.join(path_part, img_id + ".npy"))
-            if official_parts_only:
-                sids_path = path_cls.parent.parent / "annotations_SIDS" / path_cls.name / f"{img_id}.npy"
-                part_ann = filter_official_parts(np.load(sids_path), part_ann)
-            cls_ann = np.load(os.path.join(val_dataset.annotations_dir, img_id + ".npy"))
-            if require_semantic_match:
-                sids_path = path_cls.parent.parent / "annotations_SIDS" / path_cls.name / f"{img_id}.npy"
-                sids = np.load(sids_path)
-                if sids.shape != cls_ann.shape or part_ann.shape != cls_ann.shape:
-                    raise ValueError(f"Pascal semantic, part and SID annotations must have matching shapes: {img_id}")
-                valid = (sids == cls_ann) & (sids >= 1) & (sids <= 20) & (part_ann > 0)
-                part_ann = np.where(valid, part_ann, 0)
-            cls_ann = val_dataset.convert_targets(cls_ann)
+            cls_ann, part_ann = annotations
 
             with open(img_path, "rb") as f:
                 img = Image.open(f).convert("RGB")
@@ -270,83 +227,13 @@ def part_intersect(
     """Compute intersection between part labels and prototype activations."""
 
     img_tensor = to_normalized_tensor(img).unsqueeze(0).cuda()
-
     if noise is not None:
-        noise = noise * torch.randn_like(img_tensor)
-        img_tensor = img_tensor + noise
-    conv_features = ppnet.conv_features(img_tensor)
-    _, distances = ppnet.forward_from_conv_features(conv_features)
-    proto_dist_ = distances[0].permute(1, 2, 0).detach().cpu().numpy()
-
-    original_img_j = transforms.ToTensor()(img).detach().cpu().numpy()
-    original_img_j = np.transpose(original_img_j, (1, 2, 0))
-    original_img_height = original_img_j.shape[0]
-    original_img_width = original_img_j.shape[1]
-
-    part_presence = {}
-    part_presence_list = []
-
-    for class_id in np.unique(cls_ann):
-
-        if class_id == 0:
-            continue
-
-        if class_id in filter_class_ids:
-            continue
-
-        proto_ids = ppnet.prototype_class_identity[:, class_id - 1].flatten().nonzero()
-        if filter_proto_ids is not None:
-            proto_ids = [p for p in proto_ids if p in filter_proto_ids]
-        y_mask = cls_ann == class_id
-
-        part_centroids = {}
-        part_mask = part_ann * y_mask
-
-        for part_id in np.unique(part_mask):
-            if part_id <= 0:
-                continue
-            bin_part_mask = (part_mask == part_id).astype(np.uint8)
-            _, _, _, centroids = cv2.connectedComponentsWithStats(bin_part_mask, 8, cv2.CV_32S)
-            # OpenCV returns the background (label 0) before the actual part components.
-            if exclude_background_centroid:
-                centroids = centroids[1:]
-            centroids = np.round(centroids).astype(int)
-            part_centroids[part_id] = centroids
-
-        if len(part_centroids) == 0:
-            continue
-
-        else:
-            for p in proto_ids:
-                presence_list = [0] * (MAX_PARTS + 1)  # Can keep 0 here instead of np.nan
-                proto_dist_img_j = proto_dist_[:, :, p]
-                proto_act_img_j = np.log((proto_dist_img_j + 1) / (proto_dist_img_j + ppnet.epsilon))
-
-                upsampled_act_img_j = cv2.resize(
-                    proto_act_img_j, dsize=(original_img_width, original_img_height), interpolation=cv2.INTER_NEAREST
-                )
-                upsampled_act_img_j = quantile_map(
-                    torch.from_numpy(upsampled_act_img_j[None, :, :]),
-                    quantile,
-                    class_mask=torch.from_numpy(y_mask),
-                ).numpy()
-
-                for part_id, centroids in part_centroids.items():
-                    for centroid in centroids:
-                        x, y = centroid[0], centroid[1]
-                        presence_list[part_id] += upsampled_act_img_j[y, x, 0]
-                hits = [0 if val == 0 else 1 for val in presence_list]
-                if merge_left_right_parts:
-                    # Keep the stability vector binary: redundant right-hand columns
-                    # are zero in both passes, so they cannot introduce NaN != NaN.
-                    hits = [
-                        0 if np.isnan(hit) else hit
-                        for hit in merge_left_right_presence(hits, cls2name[class_id - 1])
-                    ]
-                part_presence[p.item()] = hits
-                part_presence_list.append(part_presence[p.item()] + [p.item(), cls2name[class_id - 1], img_id])
-
-    return part_presence, part_presence_list
+        img_tensor = img_tensor + noise * torch.randn_like(img_tensor)
+    return part_intersections(
+        img_tensor, img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile,
+        filter_proto_ids, filter_class_ids, max_parts=MAX_PARTS, missing_parts_nan=False,
+        exclude_background_centroid=exclude_background_centroid, merge_left_right_parts=merge_left_right_parts,
+    )
 
 
 def _run_config(config: DictConfig):
