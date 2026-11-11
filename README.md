@@ -323,9 +323,10 @@ population counts against the rows.
 
 ### Browsing the measurement catalog
 
-A read-only Streamlit app (evaluation profile) inspects, filters, compares and
-aggregates the catalog. It reads the same `MEASUREMENT_CATALOG_ROOT` but needs only
-read access. Start it from the repository root and forward the port over SSH:
+A Streamlit app (evaluation profile) inspects, filters, compares and
+aggregates the catalog. Browsing the same `MEASUREMENT_CATALOG_ROOT` needs only
+read access; launching jobs also needs write access. Start it from the repository
+root and forward the port over SSH:
 
 ```bash
 .venv/bin/python -m streamlit run segmentation/analysis/metrics/catalog_app.py \
@@ -355,6 +356,36 @@ read access. Start it from the repository root and forward the port over SSH:
   filters, but includes selected Extra fields. Download the matrix or a flat list
   of missing configurations as CSV. Fix inputs or narrow values if the grid exceeds
   100,000 cells; incompatible combinations are not automatically excluded.
+
+In **Coverage**, select rows in the missing-configurations table, review the
+generated commands, choose a full evaluation Python environment, and click
+**Run selected missing measurements**. Each selection is submitted separately
+through `scripts/run_metric.slurm`, pinned to the Slurm node hosting the app
+(`--nodelist`, not user-editable), because checkout and dataset caches may be
+node-local. The wrapper requests one GPU, eight CPUs, 32 GB and four hours.
+`METRIC_PYTHON` supplies the interpreter default; an app-only environment cannot
+run measurements. Jobs inherit the app's environment and use this checkout's
+`.env` settings and catalog root.
+
+Submission validates typed metric inputs, dataset-specific flags and local
+checkpoint paths. Missing metadata (`∅`) is not a runnable value for a metric's
+own parameters; choose explicit values. Parameters belonging only to the other
+metric must remain `∅`. The prototype checkpoint is inferred only when the
+model/stage/dataset identifies a unique recorded path. To supply an explicit
+checkpoint (including for a new model), select
+`model.inputs.prototype_checkpoint.path` in **Extra fields** and add its path
+as a candidate or fixed value. Other metadata-only Extra fields cannot be
+submitted as metric inputs.
+
+Catalog coverage is rechecked before submission, including running and failed
+entries. Job IDs and submission receipts are stored under
+`<catalog-root>/submissions/`, with logs named `metric-<job-id>.out`. Receipts
+prevent repeated submissions across reloads and app sessions; a queued job
+appears in the measurement catalog only when the calculator creates its bundle.
+If submission fails or times out, inspect Slurm and the receipt before manually
+removing that specific receipt to allow a retry. The catalog and its measurements
+directory must be writable by the app/job user. Serve the app only to trusted
+operators: the launch button submits jobs as the account running Streamlit.
 
 ## 🥇 Performance
 
