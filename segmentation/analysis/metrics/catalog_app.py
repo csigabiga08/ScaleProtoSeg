@@ -1,16 +1,22 @@
-"""Read-only Streamlit browser for the metric measurement catalog.
+"""Streamlit browser and Slurm launcher for the metric measurement catalog.
 
 Run from the repository root:
     python -m streamlit run segmentation/analysis/metrics/catalog_app.py
 """
 
+import hashlib
+import os
+import shlex
+import subprocess
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
+from segmentation.analysis.metrics import catalog_jobs as jobs
 from segmentation.analysis.metrics import catalog_table as table
 from segmentation.analysis.metrics.catalog import CatalogError, load_observations
 from segmentation.analysis.metrics.catalog_cli import validate_measurement
-
 
 st.set_page_config(page_title="Measurement catalog", layout="wide")
 
@@ -21,8 +27,8 @@ def load(root, signature):
     return {record["measurement_id"]: record for record in records}, table.records_frame(records), errors
 
 
-def csv_download(frame, name, key):
-    st.download_button("Download CSV", frame.to_csv(index=False), f"{name}.csv", "text/csv", key=key)
+def csv_download(frame, name, key, label="Download CSV"):
+    st.download_button(label, frame.to_csv(index=False), f"{name}.csv", "text/csv", key=key)
 
 
 try:
@@ -46,6 +52,8 @@ other_fields = [
     column for column in table.varying_columns(frame, list(frame.columns))
     if column not in inputs and column not in table.SCORE_COLUMNS + ("measurement_id", "score_reason")
 ]
+if jobs.PROTOTYPE_PATH in frame and jobs.PROTOTYPE_PATH not in other_fields:
+    other_fields.append(jobs.PROTOTYPE_PATH)
 
 with st.sidebar:
     if st.button("Reload catalog"):
@@ -66,7 +74,7 @@ fields = inputs + extras
 varying = table.varying_columns(view, fields)
 common = {column: view[column].iloc[0] for column in fields if column not in varying} if len(view) else {}
 
-runs_tab, compare_tab, aggregate_tab = st.tabs(["Runs", "Compare", "Aggregate"])
+runs_tab, compare_tab, aggregate_tab, coverage_tab = st.tabs(["Runs", "Compare", "Aggregate", "Coverage"])
 
 with runs_tab:
     st.caption(f"{len(view)} of {len(frame)} measurements")
@@ -154,3 +162,127 @@ with aggregate_tab:
         "and is blank when a value is missing."
     )
     csv_download(pivot, "pivot", "pivot_csv")
+
+with coverage_tab:
+    st.caption(
+        "Build a full configuration grid, including measurements that do not exist yet. "
+        "This view uses its own filters and all catalog statuses, independently of the sidebar filters. "
+        "Sidebar Extra fields are included as additional inputs."
+    )
+    coverage_columns = st.multiselect(
+        "Compare against (column dimensions)", fields,
+        default=["parameters.official_parts_only"] if "parameters.official_parts_only" in fields else [],
+        key="coverage_columns",
+    )
+    fixed_fields = st.multiselect(
+        "Fix inputs (filters)", [field for field in fields if field not in coverage_columns],
+        key="coverage_fixed_fields",
+    )
+    fixed = {}
+    for field in fixed_fields:
+        fixed[field] = st.selectbox(
+            f"Fixed value: {field}", sorted(frame[field].unique()),
+            accept_new_options=True, key=f"coverage_fixed_{field}",
+        )
+    candidates_frame = table.filter_frame(frame, {field: [value] for field, value in fixed.items()})
+    candidates = {}
+    with st.expander("Candidate values (select existing values or type additional values)", expanded=True):
+        for field in fields:
+            if field in fixed:
+                continue
+            observed = sorted(candidates_frame[field].unique())
+            options = sorted(frame[field].unique())
+            candidates[field] = st.multiselect(
+                f"{'Column' if field in coverage_columns else 'Row'} values: {field}",
+                options, default=observed or options, accept_new_options=True,
+                key=f"coverage_values_{field}",
+            )
+    st.caption(
+        "Every non-fixed input outside the column dimensions becomes a row dimension. "
+        "All selected values are crossed, even if a combination is incompatible. "
+        "Use lowercase true/false for flags and the catalog's exact text representation for other inputs."
+    )
+    if not coverage_columns:
+        st.info("Choose at least one column dimension.")
+    else:
+        try:
+            coverage, missing = table.coverage_matrix(frame, coverage_columns, candidates, fixed)
+        except ValueError as error:
+            st.warning(str(error))
+        else:
+            st.caption(
+                f"{len(coverage):,} configurations · {len(missing):,} unmeasured cells. "
+                "Cells list original scores and run statuses; null means an existing run has no score. "
+                "Not measured means no catalog entry exists."
+            )
+            st.dataframe(coverage, hide_index=True)
+            csv_download(coverage, "coverage", "coverage_csv", "Download coverage CSV")
+            csv_download(missing, "missing_measurements", "coverage_missing_csv", "Download missing configurations CSV")
+            st.subheader("Run missing measurements")
+            st.caption(
+                "Select individual missing configurations below. Jobs request one GPU, eight CPUs and 32 GB "
+                "for up to four hours, pinned to this webapp host's Slurm node. "
+                "Invalid configurations must be corrected before submission."
+            )
+            selection_key = hashlib.sha256(missing.to_json(orient="split").encode()).hexdigest()
+            missing_event = st.dataframe(
+                missing,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="multi-row",
+                key=f"coverage_missing_{selection_key}",
+            )
+            chosen = missing.iloc[missing_event.selection.rows].to_dict("records")
+            checkout = Path(__file__).resolve().parents[3]
+            python = st.text_input(
+                "Evaluation Python executable",
+                value=os.environ.get("METRIC_PYTHON", str(checkout / ".venv/bin/python")),
+                key="coverage_python",
+                help="Use a full evaluation environment, not an app-only environment.",
+            )
+            plans, plan_errors = [], []
+            if chosen:
+                try:
+                    node = jobs.current_slurm_node()
+                    st.caption(f"Slurm nodelist: `{node}` (not editable; node-local checkout and caches).")
+                    for index, configuration in enumerate(chosen, start=1):
+                        try:
+                            arguments = jobs.measurement_arguments(configuration, frame)
+                            prior = jobs.submission_record(root, arguments)
+                            if prior is not None:
+                                raise ValueError(
+                                    f"Existing submission: {prior['status']}, job {prior.get('job_id', 'unknown')}. "
+                                    f"Receipt: {jobs.submission_path(root, arguments)}"
+                                )
+                            plans.append(shlex.join(jobs.slurm_command(checkout, root, node, arguments)))
+                        except (OSError, ValueError) as error:
+                            plan_errors.append(f"Selection {index}: {error}")
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    plan_errors.append(f"Slurm is unavailable on this host: {error}")
+            if plans:
+                st.code("\n".join(plans), language="bash")
+                st.caption(
+                    f"Jobs use `{python}` and write to `{root}`. "
+                    "Submission receipts and Slurm logs are stored under the catalog's submissions directory. "
+                    "Queued jobs remain absent from the matrix until they create a measurement bundle."
+                )
+            for error in plan_errors:
+                st.warning(error)
+            if st.button(
+                "Run selected missing measurements",
+                disabled=not chosen or bool(plan_errors),
+                key="coverage_submit",
+            ):
+                outcomes = []
+                with st.spinner("Validating and submitting Slurm jobs…"):
+                    for configuration in chosen:
+                        try:
+                            receipt = jobs.submit_measurement(configuration, checkout, root, python)
+                            outcomes.append(f"Submitted job {receipt['job_id']} on {receipt['node']}.")
+                        except (OSError, ValueError, subprocess.SubprocessError) as error:
+                            details = getattr(error, "stderr", None) or str(error)
+                            outcomes.append(f"Not submitted or submission uncertain: {details}")
+                st.session_state["coverage_submission_outcomes"] = outcomes
+                st.rerun()
+            for outcome in st.session_state.get("coverage_submission_outcomes", []):
+                st.write(outcome)

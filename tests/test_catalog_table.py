@@ -1,6 +1,7 @@
 """CPU-only tests for the catalog webapp's tabular views."""
 
 import math
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -125,6 +126,58 @@ class CatalogTableTest(unittest.TestCase):
         self.assertEqual(len(comparison), 1)
         self.assertEqual(comparison.iloc[0][("score", "Off")], [None])
         self.assertEqual(comparison.iloc[0][("score", "On")], [None])
+
+    def test_coverage_crosses_row_and_column_values_and_preserves_runs(self):
+        first = record("a", flag=False, value=0.2)
+        duplicate = record("b", flag=False, value=None)
+        duplicate["status"] = "failed"
+        frame = table.records_frame([first, duplicate])
+        values = {field: list(frame[field].unique()) for field in table.input_columns(frame)}
+        values["model.label"] += ["new_model"]
+        values["dataset.name"] += ["new_dataset"]
+        values["parameters.flag"] = ["false", "true"]
+        values["parameters.quantile"] = ["0.8", "0.9"]
+        grid, missing = table.coverage_matrix(
+            frame, ["parameters.flag", "parameters.quantile"], values, {},
+        )
+        self.assertEqual(len(grid), 4)
+        self.assertEqual(len(grid["score"].columns), 4)
+        self.assertEqual(len(missing), 15)
+        scores = grid.iloc[0][("score", "parameters.flag=false | parameters.quantile=0.8")]
+        self.assertEqual(json.loads(scores.split(" | ")[0]), [0.2, None])
+        self.assertIn("complete, failed", scores)
+        new_rows = grid[grid[("", "model.label")] == "new_model"]
+        self.assertTrue((new_rows["score"] == table.NOT_MEASURED).all().all())
+        self.assertNotIn("parameters.flag", grid.columns.get_level_values(1))
+
+    def test_coverage_fixed_values_and_unseen_values_with_no_matching_measurements(self):
+        frame = table.records_frame([
+            record("a", metric="consistency", flag=False),
+            record("b", metric="stability", flag=True),
+        ])
+        fixed = {field: frame.iloc[0][field] for field in table.input_columns(frame) if field != "parameters.flag"}
+        values = {"parameters.flag": ["false", "true"]}
+        grid, missing = table.coverage_matrix(frame, ["parameters.flag"], values, fixed)
+        self.assertEqual(len(grid), 1)
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(missing.iloc[0]["metric"], "consistency")
+        self.assertEqual(missing.iloc[0]["parameters.flag"], "true")
+        fixed["metric"] = "future_metric"
+        for source in (frame, frame.iloc[:0]):
+            grid, missing = table.coverage_matrix(source, ["parameters.flag"], values, fixed)
+            self.assertEqual(len(missing), 2)
+            self.assertTrue((grid == table.NOT_MEASURED).all().all())
+
+    def test_coverage_requires_all_inputs_and_bounds_the_cartesian_product(self):
+        frame = table.records_frame([record("a", flag=True)])
+        values = {field: list(frame[field].unique()) for field in table.input_columns(frame)}
+        with self.assertRaisesRegex(ValueError, "at least one candidate"):
+            table.coverage_matrix(frame, ["parameters.flag"], {**values, "model.label": []}, {})
+        with self.assertRaisesRegex(ValueError, "Every input"):
+            table.coverage_matrix(frame, ["parameters.flag"], {"parameters.flag": ["true"]}, {})
+        with patch.object(table, "MAX_COVERAGE_CELLS", 1):
+            with self.assertRaisesRegex(ValueError, "Fix more inputs"):
+                table.coverage_matrix(frame, ["parameters.flag"], {**values, "model.label": ["a", "b"]}, {})
 
     def test_root_resolution_requires_only_read_access(self):
         with tempfile.TemporaryDirectory() as directory:
