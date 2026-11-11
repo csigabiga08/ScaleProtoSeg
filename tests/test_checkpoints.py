@@ -16,7 +16,7 @@ class CheckpointTests(unittest.TestCase):
     def test_complete_model_loads_on_cpu_in_both_formats(self):
         model = torch.nn.Linear(3, 2)
         model.description = "complete model checkpoint"
-        with TemporaryDirectory() as temporary:
+        with TemporaryDirectory(dir=Path.cwd()) as temporary:
             path = Path(temporary) / "model.pth"
             for zip_format in (True, False):
                 with self.subTest(zip_format=zip_format):
@@ -37,7 +37,7 @@ class CheckpointTests(unittest.TestCase):
         historical_module = ModuleType("model_multiscale_group")
         historical_module.PPNetMultiScale = PPNetMultiScale
 
-        with TemporaryDirectory() as temporary:
+        with TemporaryDirectory(dir=Path.cwd()) as temporary:
             path = Path(temporary) / "historical.pth"
             for zip_format in (True, False):
                 with self.subTest(zip_format=zip_format):

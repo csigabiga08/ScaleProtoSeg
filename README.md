@@ -171,8 +171,7 @@ python -m segmentation.eval_valid_multiscale <your_training_run_name> <training_
 # Generating predictions on cityscapes or pascal test set
 python -m segmentation.eval_test  <your_training_run_name> <training_stage> <batch_size> <flag_pascal>
 
-# Evaluation for consistency metric
-python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> <data_type> --quantile <quantile> --threshold <threshold> --group-name <group_training_run_name>
+# See "Native consistency and stability measurements" below
 ```
 
 ### ProtoSeg
@@ -187,175 +186,140 @@ python -m segmentation.eval_valid_multiscale <your_training_run_name> <training_
 # Generating predictions on cityscapes or pascal test set
 python -m segmentation.eval_test  <your_training_run_name> <training_stage> <batch_size> <flag_pascal>
 
-# Evaluation for consistency metric
-python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> <data_type> --quantile <quantile> --threshold <threshold>
+# See "Native consistency and stability measurements" below
 ```
 
-### Consistency and stability result folders
+### Native consistency and stability measurements
 
-Both calculators save into one of four folders in the evaluated checkpoint's model
-directory. For `<model>/checkpoints/push_last.pth`, these folders are directly under
-`<model>/`; if the checkpoint is stored directly in a model directory, the folders
-are created there. Both metrics share the selected folder:
+Every invocation allocates a fresh UUID directory under the catalog root configured
+by `MEASUREMENT_CATALOG_ROOT`:
 
 ```text
-<model>/
-  checkpoints/
-    push_last.pth
-  metrics-allparts-background/
-  metrics-allparts-foreground/
-  metrics-filteredparts-background/
-  metrics-filteredparts-foreground/
+<catalog-root>/
+  measurements/<measurement-uuid>/
+    result.json
+    observations.csv
 ```
 
-Only folders for configurations that you actually run are created. Folder names
-contain only part selection and centroid selection. `background` means foreground
-part centroids **plus** OpenCV's background centroid. `foreground` means only actual
-part-component centroids. Existing results in older directories are left in place.
+Set `MEASUREMENT_CATALOG_ROOT` in the job environment or in this checkout's ignored
+`.env` file. The root must already exist and be writable; metrics do not fall back
+to `RESULTS_DIR`, and there is no `--output-dir` or catalog-root command-line option.
+`RESULTS_DIR` still locates stage-selected checkpoints and relative group names.
+Catalog configuration uses `python-dotenv` quoting, comments, and interpolation;
+an exported root takes precedence, and catalog lookup does not load other settings
+into the environment. Metadata validation uses Pydantic, pinned in both dependency
+profiles; filesystem integrity and scientific comparability are checked separately.
 
-Quantiles and thresholds are included in result filenames. Stability filenames
-include the noise standard deviation and seed. Filenames also identify the evaluated
-checkpoint and grouping filter, so different checkpoint/filter configurations can
-coexist in the same folder. For example, an ungrouped run writes:
-
-```text
-metrics-allparts-background/
-  consistency_score_th_0.8_qt_0.8_checkpoint_push_last_group_ungrouped.txt
-  part_presence_th_0.8_qt_0.8_checkpoint_push_last_group_ungrouped.csv
-  part_presence_mean_th_0.8_qt_0.8_checkpoint_push_last_group_ungrouped.csv
-  description_consistency_th_0.8_qt_0.8_checkpoint_push_last_group_ungrouped.json
-  stability_score_std_0.2_qt_0.8_seed_0_checkpoint_push_last_group_ungrouped.txt
-  tot_presence_stab_std_0.2_qt_0.8_seed_0_checkpoint_push_last_group_ungrouped.csv
-  description_stability_std_0.2_qt_0.8_seed_0_checkpoint_push_last_group_ungrouped.json
-```
-
-Grouped runs use `group_grouped-<identity>` instead of `group_ungrouped` in their
-filenames. The identity is computed from the resolved grouping checkpoint path;
-its full path is recorded in the description.
-
-Each run has its own `description_<metric>_<parameters>.json`, which records the
-exact checkpoint and grouping paths, filtering flags, quantile, threshold/noise/seed,
-Python and package versions, hostname and Slurm job ID, annotation location,
-image-order digest, and completion status. Completed runs also record the score
-and the number of evaluated images and observations. Descriptions for consistency,
-stability, and different quantiles coexist. Repeating an identical configuration
-uses the same filenames; use `--output-dir` with a separate folder to retain repeats.
-The scripts print the result directory in their log.
+`result.json` records run status, checkpoint identities, the dataset, the expanded
+metric protocol and parameters (quantile, seed and the metric flags), selected
+prototype IDs, scores, the git commit and command, and the observations artifact
+(path, size, SHA-256). It is first published as `running`, then atomically replaced
+with a terminal `complete` or `failed` record. A bundle contains exactly the two
+files above. Observations use stable sample/class/prototype/repetition keys; blank
+consistency part values mean unavailable, while zero means an observed miss.
+Stability stores clean and noisy part vectors rather than derived equality flags.
+A sample is contributing if it appears in `observations.csv`; `population` only
+counts candidates, contributing samples and observations. There
+is no schema or protocol version: a changed metric definition must be added behind a
+new flag. Repeated configurations are separate measurements.
 
 Both calculators accept these part and centroid options:
 
 | Desired configuration | Option | Folder label |
 |---|---|---|
-| All decoded parts | No part-filter flag | `allparts` |
-| Official Cityscapes semantic/part pairs | `--official-parts-only` | `filteredparts` |
-| Pascal parts matching the VOC semantic class | `--require-semantic-match` | `filteredparts` |
+| All decoded parts | Default | `allparts` |
+| Official Cityscapes semantic/part pairs | `official_parts_only=true` | `filteredparts` |
+| Pascal parts matching the VOC semantic class | `require_semantic_match=true` | `filteredparts` |
 | Foreground and background centroids | Default | `background` |
-| Foreground part-component centroids only | `--exclude-background-centroid` | `foreground` |
+| Foreground part-component centroids only | `exclude_background_centroid=true` | `foreground` |
 
 Both filtered modes require the native `annotations_SIDS` cache. Filtering is applied
 in memory to both clean and noisy images and does not modify cached labels. The exact
 filter is recorded in the description; Pascal semantic matching does not apply the
 Cityscapes taxonomy.
 
-### Pascal consistency with left/right parts merged
+Run either calculator from the repository root as a Python module. Supply config
+fields as bare Hydra `key=value` overrides (not positional arguments or `--` flags).
+The following Pascal examples select exact evaluated checkpoints and a prototype
+filter checkpoint:
 
-Add `--merge-left-right-parts` to the **consistency** command for Pascal VOC.
-It is not a Cityscapes option and does not change stability evaluation. The default
-continues to treat left/right labels separately.
+### Pascal left/right part merging
 
-This pools 54 left/right pairs across 11 Pascal object classes, using the normalized
-part IDs from `parts.yaml`. For example, a person's left and right eyes become one
-candidate part; front/back and upper/lower distinctions remain separate. Unpaired
-parts are unchanged. The cached labels and masks are never modified.
-
-Connected-component centroids are still computed separately for each original part
-label. For each prototype/image, a paired part is hit if **any** centroid of either
-side is inside that prototype's activation map. The side hits are ORed **before**
-computing the across-image mean. An image counts toward that pair's average when
-at least one side is annotated; when neither side is annotated the observation is
-NaN and is ignored. The existing centroid option still applies independently to
-each original mask: use `--exclude-background-centroid` for actual part-component
-centroids only.
-
-The consistency decision otherwise stays the same: a prototype is consistent if
-at least one candidate part's mean hit frequency is **strictly greater than**
-`--threshold`. The score is the proportion of consistent prototypes. This measures
-consistency with a bilateral part category, rather than a particular side. Because
-the paired category uses the union of the sides' annotated images, the final score
-is not guaranteed to increase.
-
-For example, if a prototype hits only the left eye in image A and only the right
-eye in image B, with both eyes annotated in each image, the old frequencies are
-0.5 and 0.5. The merged eye frequency is 1.0, exceeding the default 0.8 threshold.
-
-```text
-for each image, object class, prototype:
-    compute centroids separately for every ORIGINAL part label
-    compute binary centroid hits using the prototype activation map
-    for each left/right pair:
-        if either side is annotated:
-            hit[pair] = hit[left] OR hit[right]
-        else:
-            hit[pair] = NaN
-    keep unpaired part hits unchanged
-
-for each prototype:
-    frequency[part] = mean of non-NaN hits across images
-    consistent = any(frequency[part] > consistency_threshold)
-score = mean(consistent across prototypes)
-```
-
-The merged candidate uses the left member's `part_<id>` CSV column; the right
-member's column becomes NaN to avoid counting the pair twice. The description JSON
-records the option and the complete class-specific canonical-ID/member-label map.
-The existing four output folder names are unchanged. Merged-run result and
-description filenames include `lrmerged` so they coexist with separate-side runs.
+Set `merge_left_right_parts=true` for either metric to treat Pascal's 54
+class-specific left/right pairs as one candidate part. Centroids remain computed
+from the original masks; their binary hits are ORed per image, without modifying
+cached labels. Consistency ignores a pair when neither side is annotated. Stability
+merges the clean and noisy hits independently before comparing their vectors.
+Unpaired parts are unchanged. The protocol records the canonical IDs and source
+labels for all 54 pairs.
 
 ```bash
-sbatch --output="$PWD/consistency-lrmerged-%j.out" scripts/run_metric.slurm \
-  consistency pascalvoc push_best pascal \
-  --checkpoint /data/shared/protoseg/checkpoints/pascalvoc/checkpoints/push_best.pth \
-  --require-semantic-match --exclude-background-centroid \
-  --merge-left-right-parts --quantile 0.8 --threshold 0.8
+python -m segmentation.analysis.metrics.consistency \
+  model_name=scaleproto_pascal training_phase=push data_type=pascal \
+  checkpoint=/data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
+  group_checkpoint=/data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal/checkpoints/th-0.05-nopush-group_last.pth \
+  quantile=0.8 threshold=0.8 require_semantic_match=true \
+  exclude_background_centroid=true merge_left_right_parts=true
+
+python -m segmentation.analysis.metrics.stability \
+  model_name=scaleproto_pascal training_phase=push data_type=pascal \
+  checkpoint_path=/data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
+  group_checkpoint=/data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal/checkpoints/th-0.05-nopush-group_last.pth \
+  quantile=0.8 std_dev=0.2 seed=0 require_semantic_match=true \
+  exclude_background_centroid=true merge_left_right_parts=true
 ```
 
-Select an exact evaluated checkpoint with `--checkpoint` for consistency or
-`--checkpoint-path` for stability. Select a prototype-filter checkpoint using
-`--group-checkpoint /path/to/group.pth` on either calculator, or retain the existing
-`--group-name /path/to/group_run` option. Stability also accepts `--seed` (default 0).
-Use `--output-dir /exact/result/folder` to override the default model-level folder;
-parameterized result files and descriptions are still written there. `RESULTS_DIR`
-continues to locate stage-selected checkpoints and relative group names; it no longer
-selects the default result directory.
-
-From `~/ScaleProtoSeg-ssd`, submit a single-quantile Pascal stability job:
-
-```bash
-sbatch --output="$PWD/stability-%j.out" scripts/run_metric.slurm \
-  stability scaleproto_pascal push pascal \
-  --checkpoint-path /data/shared/protoseg/scaleproto_checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
-  --group-name /data/shared/protoseg/scaleproto_checkpoints/group_scaleproto_pascal \
-  --quantile 0.8 --std-dev 0.2
-```
-
-To use Pascal semantic matching and foreground centroids, append
-`--require-semantic-match --exclude-background-centroid`. To run consistency, use:
-
-```bash
-sbatch --output="$PWD/consistency-%j.out" scripts/run_metric.slurm \
-  consistency scaleproto_pascal push pascal \
-  --checkpoint /data/shared/protoseg/scaleproto_checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
-  --group-name /data/shared/protoseg/scaleproto_checkpoints/group_scaleproto_pascal \
-  --quantile 0.8 --threshold 0.8
-```
+The common required overrides are `model_name`, `training_phase`, and `data_type`.
+Without an explicit checkpoint override, each calculator selects the checkpoint for
+that model and phase under `RESULTS_DIR`. Consistency uses `checkpoint=...` to select
+an exact evaluated checkpoint; stability uses `checkpoint_path=...`. Either accepts
+`group_checkpoint=...` for an exact prototype-filter checkpoint or `group_name=...`
+to resolve the existing group checkpoint under `RESULTS_DIR`. The metric-specific
+protocol values are also Hydra overrides: consistency accepts `quantile` and
+`threshold`, while stability accepts `quantile`, `std_dev`, and `seed` (default 0).
+Part selection and centroid behavior are controlled by `official_parts_only`,
+`require_semantic_match`, `exclude_background_centroid`, and
+`merge_left_right_parts`; set the applicable boolean to `true` as shown above.
+These options are recorded in the result protocol.
+Pascal semantic matching applies only to Pascal, and official-parts filtering applies
+only to Cityscapes. Output directories are allocated automatically from
+`MEASUREMENT_CATALOG_ROOT`.
 
 The Slurm wrapper requests one GPU on TANK, eight CPUs, and 32 GB of memory.
 Override the node with `sbatch --nodelist=maxitank ...` when using that node's checkout
 and preprocessed data. `/data_ssd` storage can differ between nodes: the updated code
-and configured caches must be available on the node you select. The description's
-hostname and annotation path identify which environment was used.
+and configured caches must be available on the node you select. The result record's
+hostname and annotation paths identify which environment was used.
 
-For testing it is necessary to then properly arrange the output folder to match the benchmarks requirements online.
+### Querying the measurement catalog
+
+The metadata-only catalog CLI uses the same `MEASUREMENT_CATALOG_ROOT` environment
+setting as the metric writers. Exported values take precedence over this checkout's
+ignored `.env`; `.env_template` contains a placeholder to replace locally. The
+Slurm wrapper uses the submit checkout from `SLURM_SUBMIT_DIR` (or `PWD`) unless
+`SCALEPROTOSEG_ROOT` is explicitly set, and runs `METRIC_PYTHON` when configured
+(otherwise `.venv/bin/python`).
+
+List complete measurements without opening observation tables, checkpoints, or
+model code:
+
+```bash
+.venv/bin/python -m segmentation.analysis.metrics.catalog_cli list \
+  --metric consistency --dataset pascal --quantile 0.8 \
+  --variant protocol.consistency.threshold=0.8
+```
+
+Running and failed measurements remain discoverable with `--all-status`; direct
+non-complete status filters also require that opt-in.
+
+Validate a record or all selected records:
+
+```bash
+.venv/bin/python -m segmentation.analysis.metrics.catalog_cli validate <measurement-id>
+```
+
+`validate` checks metadata, the observations artifact size and hash, and the
+population counts against the rows.
 
 ## 🥇 Performance
 

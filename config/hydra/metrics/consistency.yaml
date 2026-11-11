@@ -1,0 +1,24 @@
+defaults:
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+  - _self_
+
+model_name: null
+training_phase: null
+data_type: null
+checkpoint: null
+group_name: null
+group_checkpoint: null
+quantile: 0.8
+threshold: 0.8
+official_parts_only: false
+require_semantic_match: false
+exclude_background_centroid: false
+merge_left_right_parts: false
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false
