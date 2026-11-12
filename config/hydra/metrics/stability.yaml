@@ -7,7 +7,6 @@ model: null
 grouping_model: null
 data_type: null
 quantile: 0.8
-quantile_scope: class
 std_dev: 0.2
 seed: 0
 official_parts_only: false

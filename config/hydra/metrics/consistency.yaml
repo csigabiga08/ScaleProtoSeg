@@ -7,7 +7,6 @@ model: null
 grouping_model: null
 data_type: null
 quantile: 0.8
-quantile_scope: class
 threshold: 0.8
 official_parts_only: false
 require_semantic_match: false

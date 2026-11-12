@@ -185,6 +185,22 @@ class MetricCatalogTests(unittest.TestCase):
             self.assertIsNone(score["value"])
             self.assertEqual(score["reason"], "no eligible prototype observations")
 
+    def test_implicit_grouping_rejects_weights_not_matching_the_main_registration(self):
+        other_checkpoint = Path(self.temporary.name) / "other.pth"
+        other_checkpoint.write_bytes(b"unreferenced weights")
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            with self.assertRaisesRegex(CatalogError, "referenced registration"):
+                output.register_input("group_checkpoint", other_checkpoint)
+            self.assertIsNone(output.result.grouping_model)
+            self.assertNotIn("group_checkpoint", output.result.model.inputs)
+            output.register_input("group_checkpoint", self.checkpoint)
+            self.assertEqual(
+                output.result.grouping_model.registration_id,
+                self.registration["model_id"],
+            )
+            self.assertNotIn("group_checkpoint", output.result.grouping_model.inputs)
+
     def test_metadata_requires_its_sections_and_artifact_for_complete_records(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             bundle = self.finished_bundle()

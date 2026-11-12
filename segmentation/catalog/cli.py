@@ -180,10 +180,6 @@ def _command_parser():
     relocate = commands.add_parser("relocate-model", help="Update a location only if checkpoint contents match.")
     relocate.add_argument("model")
     relocate.add_argument("checkpoint")
-    commands.add_parser("migration-plan", help="Print a manifest requiring reviewed model references.")
-    migration = commands.add_parser("migrate", help="Validate a reviewed manifest; writes require --apply.")
-    migration.add_argument("manifest", type=Path)
-    migration.add_argument("--apply", action="store_true", help="Back up original metadata before rewriting it.")
     return parser
 
 
@@ -236,20 +232,6 @@ def main(argv=None):
                 )
             else:
                 result = relocate_model(args.model, args.checkpoint, root)
-            print(json.dumps(result, indent=2))
-            return 0
-        if args.command in ("migration-plan", "migrate"):
-            from segmentation.catalog.migrate import migrate, migration_plan
-
-            result = (
-                migration_plan(root)
-                if args.command == "migration-plan"
-                else migrate(
-                    root,
-                    read_result(args.manifest),
-                    apply=args.apply,
-                )
-            )
             print(json.dumps(result, indent=2))
             return 0
         if args.command == "list":

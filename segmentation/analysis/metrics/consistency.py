@@ -38,6 +38,9 @@ class ConsistencyMetric(MetricPlugin):
     def protocol_options(self, context):
         return {"excluded_evaluation_class_ids": list(self.excluded_classes(context))}
 
+    def implicit_grouping(self, run_input, model):
+        return hasattr(model, "group_projection")
+
     def observe(self, output, variants, context):
         (rows,) = variants
         self.rows.extend(rows)

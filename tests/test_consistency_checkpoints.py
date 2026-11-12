@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import MagicMock, call, patch
 
 from pydantic import ValidationError
+import torch
 
 from segmentation.analysis.metrics import consistency, pipeline, stability
 from segmentation.analysis.metrics.protocol import ConsistencyRunInput, StabilityRunInput
@@ -62,6 +63,8 @@ class ConsistencyCheckpointTests(unittest.TestCase):
                 with self.subTest(metric=input_type.__name__, group=group_reference):
                     model, group = MagicMock(), MagicMock()
                     model.cuda.return_value = model
+                    if group_reference is None:
+                        del model.group_projection
                     with (
                         patch.object(pipeline, "load_model_checkpoint", side_effect=[model, group]) as load,
                         patch.object(pipeline, "proto_filter", return_value=[1]) as filtering,
@@ -83,6 +86,53 @@ class ConsistencyCheckpointTests(unittest.TestCase):
                         filtering.assert_not_called()
                     else:
                         filtering.assert_called_once_with(group if group_reference == "group" else model)
+
+    def test_implicit_grouping_reuses_and_records_the_main_registration(self):
+        for input_type, runner in self.runners:
+            for grouped in (False, True):
+                with self.subTest(metric=input_type.__name__, grouped=grouped):
+                    registration = self.models[int(grouped)]
+                    model = MagicMock()
+                    model.cuda.return_value = model
+                    model.prototype_class_identity = torch.eye(2)
+                    if not grouped:
+                        del model.group_projection
+                    before = set((self.root / "measurements").glob("*/result.json"))
+                    with (
+                        patch.object(pipeline, "load_model_checkpoint", return_value=model) as load,
+                        patch.object(pipeline, "proto_filter", return_value=[1]) as filtering,
+                        patch.object(
+                            pipeline,
+                            "PatchClassificationDataset",
+                            side_effect=DatasetReached,
+                        ),
+                    ):
+                        with self.assertRaises(DatasetReached):
+                            runner(input_type(model=registration["name"], data_type="cityscapes"))
+                    load.assert_called_once_with(registration["checkpoint"]["path"])
+                    used_grouping = input_type is ConsistencyRunInput and grouped
+                    if used_grouping:
+                        filtering.assert_called_once_with(model)
+                    else:
+                        filtering.assert_not_called()
+                    (path,) = set((self.root / "measurements").glob("*/result.json")) - before
+                    record = json.loads(path.read_text())
+                    self.assertEqual(
+                        record["selected_prototype_ids"],
+                        [1] if used_grouping else [0, 1],
+                    )
+                    if used_grouping:
+                        self.assertEqual(
+                            record["grouping_model"]["registration_id"],
+                            registration["model_id"],
+                        )
+                        self.assertEqual(
+                            record["model"]["inputs"]["group_checkpoint"],
+                            record["model"]["inputs"]["prototype_checkpoint"],
+                        )
+                    else:
+                        self.assertIsNone(record["grouping_model"])
+                        self.assertNotIn("group_checkpoint", record["model"]["inputs"])
 
     def test_grouping_projection_failures_are_recorded_for_both_metrics(self):
         for input_type, runner in self.runners:

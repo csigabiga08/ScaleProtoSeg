@@ -62,6 +62,7 @@ class ConsistencyPartsTests(unittest.TestCase):
             dataset.get_img_path.return_value = str(image_path)
             model = MagicMock()
             model.cuda.return_value = model
+            del model.group_projection
             model.epsilon = 1e-4
             model.prototype_class_identity = torch.zeros((2, 21))
             model.prototype_class_identity[0, 4] = 1
@@ -104,42 +105,6 @@ class ConsistencyPartsTests(unittest.TestCase):
             self.assertEqual({row["class_id"] for row in stable_rows}, {"2", "5"})
             self.assertTrue(all(row["part_2"] == "" for row in consistent_rows))
             self.assertTrue(all(row["part_2"] == "0" and row["noisy_part_2"] == "0" for row in stable_rows))
-
-    def test_explicit_image_quantile_scope_changes_the_threshold_region(self):
-        image = Image.new("RGB", (2, 2))
-        semantic = np.array([[2, 0], [0, 0]])
-        parts = np.array([[1, 0], [0, 0]])
-        model = MagicMock()
-        model.epsilon = 1e-4
-        model.prototype_class_identity = torch.tensor([[0, 1]])
-        model.forward_from_conv_features.return_value = (None, torch.tensor([[[[0.0, 10.0], [10.0, 10.0]]]]))
-        with (
-            patch.object(helpers, "to_normalized_tensor", return_value=torch.zeros((3, 2, 2))),
-            patch.object(torch.Tensor, "cuda", lambda self: self),
-        ):
-            _, class_rows = part_intersect(
-                image,
-                semantic,
-                parts,
-                model,
-                {1: "aeroplane"},
-                "sample",
-                0.8,
-                exclude_background_centroid=True,
-            )
-            _, image_rows = part_intersect(
-                image,
-                semantic,
-                parts,
-                model,
-                {1: "aeroplane"},
-                "sample",
-                0.8,
-                exclude_background_centroid=True,
-                quantile_scope="image",
-            )
-        self.assertEqual(class_rows[0][1], 0)
-        self.assertEqual(image_rows[0][1], 1)
 
     def test_official_taxonomy(self):
         sids, pids = np.meshgrid(np.arange(35), np.arange(-1, 100), indexing="ij")

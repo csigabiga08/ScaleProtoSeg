@@ -13,7 +13,6 @@ class MetricRunInput(BaseModel):
     grouping_model: Optional[str] = None
     data_type: Literal["cityscapes", "pascal"]
     quantile: float = Field(default=0.8, ge=0, le=1)
-    quantile_scope: Literal["class", "image"] = "class"
     official_parts_only: bool = False
     require_semantic_match: bool = False
     exclude_background_centroid: bool = False
@@ -128,7 +127,6 @@ class ConsistencyRunInput(MetricRunInput):
         return {
             "metric": "consistency",
             "quantile": self.quantile,
-            **({"quantile_scope": self.quantile_scope} if self.quantile_scope != "class" else {}),
             "parts": self._protocol_parts(valid_part_ids, left_right_part_groups),
             "classes": classes,
             "consistency": {
@@ -155,7 +153,6 @@ class StabilityRunInput(MetricRunInput):
         return {
             "metric": "stability",
             "quantile": self.quantile,
-            **({"quantile_scope": self.quantile_scope} if self.quantile_scope != "class" else {}),
             "parts": self._protocol_parts(valid_part_ids, left_right_part_groups),
             "classes": self._protocol_classes(
                 semantic_id_to_evaluation_id,

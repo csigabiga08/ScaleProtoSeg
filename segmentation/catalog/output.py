@@ -192,8 +192,13 @@ class MetricOutput:
         self._ensure_running()
         identity = Artifact(**_file_identity(path))
         registered = self.result.model.inputs.get(role)
+        reuse_main = role == "group_checkpoint" and self.result.grouping_model is None
+        if reuse_main:
+            registered = self.result.model.inputs["prototype_checkpoint"]
         if registered is None or (registered.sha256, registered.bytes) != (identity.sha256, identity.bytes):
-            raise CatalogError("Additional model inputs must match an explicitly referenced registration")
+            raise CatalogError("Additional model inputs must match a referenced registration")
+        if reuse_main:
+            self.result.grouping_model = self.result.model.model_copy(deep=True)
         self.result.model.inputs[role] = identity
         self._write_result()
 

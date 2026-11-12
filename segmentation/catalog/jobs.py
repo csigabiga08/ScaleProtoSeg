@@ -32,7 +32,7 @@ def measurement_arguments(configuration, frame, root=None):
     if metric not in RUN_INPUTS:
         raise ValueError("Only consistency and stability measurements can be submitted.")
     input_type = RUN_INPUTS[metric]
-    parameters = BOOLEAN_PARAMETERS | {"quantile", "quantile_scope", "threshold", "std_dev", "seed"}
+    parameters = BOOLEAN_PARAMETERS | {"quantile", "threshold", "std_dev", "seed"}
     allowed = set(table.input_columns(frame)) | {f"parameters.{name}" for name in parameters}
     for field in configuration:
         if field not in allowed:
@@ -79,8 +79,6 @@ def measurement_arguments(configuration, frame, root=None):
             if value not in ("true", "false"):
                 raise ValueError(f"{field} must be true or false.")
             inputs[parameter] = value == "true"
-        elif parameter == "quantile_scope":
-            inputs[parameter] = value
         elif parameter == "seed":
             inputs[parameter] = int(value)
         else:

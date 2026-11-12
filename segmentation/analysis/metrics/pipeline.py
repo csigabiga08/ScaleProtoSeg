@@ -36,6 +36,9 @@ class MetricPlugin(ABC):
     def protocol_options(self, context):
         return {}
 
+    def implicit_grouping(self, run_input, model):
+        return False
+
     @abstractmethod
     def observe(self, output, variants, context):
         """Record one sample's ordered clean/noisy observation rows."""
@@ -99,6 +102,9 @@ def run_metric(run_input: MetricRunInput, metric: MetricPlugin):
                 raise ValueError("The registered grouping model has no group projection")
             grouping_model.eval()
             prototype_ids = proto_filter(grouping_model)
+        elif metric.implicit_grouping(run_input, model):
+            output.register_input("group_checkpoint", run_input.resolved_checkpoint_path)
+            prototype_ids = proto_filter(model)
         output.set_selected_prototype_ids(selected_prototypes(model, prototype_ids, excluded_classes))
         output.update_model_metadata(runtime_class=type(model).__name__)
 
@@ -133,7 +139,6 @@ def run_metric(run_input: MetricRunInput, metric: MetricPlugin):
                     noise=noise,
                     exclude_background_centroid=run_input.exclude_background_centroid,
                     merge_left_right_parts=run_input.merge_left_right_parts,
-                    quantile_scope=run_input.quantile_scope,
                 )
                 variants.append(rows)
             metric.observe(output, variants, context)

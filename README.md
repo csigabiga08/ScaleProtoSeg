@@ -304,7 +304,9 @@ python -m segmentation.analysis.metrics.stability \
 The common required overrides are `model` (UUID or unique name) and `data_type`.
 `grouping_model` optionally references another registered model for prototype
 selection; it may reference the main model itself, in which case it is loaded once.
-Omitting it means no group-based filtering, even if the main model has a projection.
+If omitted for consistency, the main model's own group projection is used when
+present, and its registration is recorded in both roles. Stability requires an
+explicit grouping reference to enable group-based filtering.
 Datasets must match, and a grouping model must actually have a group projection.
 Measurements snapshot both registrations and their checkpoint identities.
 The metric-specific
@@ -314,8 +316,6 @@ Part selection and centroid behavior are controlled by `official_parts_only`,
 `require_semantic_match`, `exclude_background_centroid`, and
 `merge_left_right_parts`; set the applicable boolean to `true` as shown above.
 These options are recorded in the result protocol.
-`quantile_scope=class` is the default; `quantile_scope=image` reproduces historical
-whole-image experiments, with the scope explicitly recorded in parameters/protocol.
 Pascal semantic matching applies only to Pascal, and official-parts filtering applies
 only to Cityscapes. Output directories are allocated automatically from
 `MEASUREMENT_CATALOG_ROOT`.
@@ -325,28 +325,6 @@ Override the node with `sbatch --nodelist=maxitank ...` when using that node's c
 and preprocessed data. `/data_ssd` storage can differ between nodes: the updated code
 and configured caches must be available on the node you select. The result record's
 hostname and annotation paths identify which environment was used.
-
-### Migrating historical measurements
-
-Prepare, review and apply a manifest; no migration happens automatically:
-
-```bash
-python -m segmentation.catalog.cli migration-plan > migration.json
-# Register checkpoints, then fill model/grouping_model references in migration.json.
-python -m segmentation.catalog.cli migrate migration.json
-python -m segmentation.catalog.cli migrate migration.json --apply
-```
-
-The default is validation/dry-run only. Every historical grouping input requires
-a grouping-model reference. Where historical hashes are unavailable, each entry
-must explicitly set `confirm_historical_identity: true` after human verification;
-current file hashes are not proof of historical identity. Seeds are never parsed
-from paths. All entries are checked before rewriting; original `result.json` bytes
-are backed up under `backups/registration-<uuid>/` with an application receipt.
-An interrupted apply preserves all backups and records which entries were applied.
-Only metadata changes: observation bytes and scores remain untouched. Quantile scope
-and left/right merging are recovered from saved descriptions; original model
-metadata remains in `registration_migration`. Archived bundles are not selected.
 
 ### Querying the measurement catalog
 

@@ -99,7 +99,6 @@ def part_intersect(
     noise=None,
     exclude_background_centroid=False,
     merge_left_right_parts=False,
-    quantile_scope="class",
 ):
     """Intersect original part centroids with clean or noisy prototype activations."""
     img_tensor = to_normalized_tensor(img).unsqueeze(0).cuda()
@@ -137,9 +136,7 @@ def part_intersect(
             activation = quantile_map(
                 torch.from_numpy(activation[None, :, :]),
                 quantile,
-                class_mask=torch.from_numpy(
-                    np.ones_like(class_mask, dtype=bool) if quantile_scope == "image" else class_mask
-                ),
+                class_mask=torch.from_numpy(class_mask),
             ).numpy()
             for part_id, centroids in part_centroids.items():
                 presence[part_id] = 0
