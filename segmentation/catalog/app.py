@@ -1,10 +1,11 @@
 """Streamlit browser and Slurm launcher for the metric measurement catalog.
 
 Run from the repository root:
-    python -m streamlit run segmentation/analysis/metrics/catalog_app.py
+    python -m streamlit run segmentation/catalog/app.py
 """
 
 import hashlib
+import json
 import os
 import shlex
 import subprocess
@@ -13,10 +14,12 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from segmentation.analysis.metrics import catalog_jobs as jobs
-from segmentation.analysis.metrics import catalog_table as table
-from segmentation.analysis.metrics.catalog import CatalogError, load_observations
-from segmentation.analysis.metrics.catalog_cli import validate_measurement
+from segmentation.catalog import jobs as jobs
+from segmentation.catalog import table as table
+from segmentation.catalog import CatalogError, load_observations
+from segmentation.catalog.cli import validate_measurement
+from segmentation.catalog.architectures import ARCHITECTURES
+from segmentation.catalog.models import list_models, register_model
 
 st.set_page_config(page_title="Measurement catalog", layout="wide")
 
@@ -40,6 +43,39 @@ except CatalogError as error:
 records, frame, errors = load(str(root), table.catalog_signature(root))
 st.title("Measurement catalog")
 st.caption(f"`{root}` · {len(frame)} measurements")
+with st.expander("Registered models", expanded=frame.empty):
+    models = list_models(root)
+    st.dataframe(pd.json_normalize(models), hide_index=True)
+    st.caption("Use a model's UUID or unique name in metric commands. Files are referenced, never copied.")
+    architecture = st.selectbox("Architecture", sorted({name for name, _ in ARCHITECTURES}))
+    st.json(ARCHITECTURES[(architecture, 1)].model_json_schema(), expanded=False)
+    with st.form("register_model"):
+        name = st.text_input("Unique model name")
+        checkpoint = st.text_input("Existing checkpoint path")
+        dataset = st.selectbox("Training dataset", ["cityscapes", "pascal"])
+        config = st.text_area(
+            "Architecture configuration (JSON)",
+            value='{"stage": "push"}' if architecture == "ProtoSeg" else '{"stage": "push", "grouped": false}',
+        )
+        known_seed = st.checkbox("Training seed is known", value=False)
+        training_seed = st.number_input("Training seed", value=0, step=1)
+        tags = st.text_area("Tags (JSON string values)", value="{}")
+        if st.form_submit_button("Register checkpoint"):
+            try:
+                register_model(
+                    root=root,
+                    name=name,
+                    architecture=architecture,
+                    config=json.loads(config),
+                    dataset=dataset,
+                    checkpoint=checkpoint,
+                    seed=int(training_seed) if known_seed else None,
+                    tags=json.loads(tags),
+                )
+            except (CatalogError, OSError, ValueError) as error:
+                st.error(str(error))
+            else:
+                st.rerun()
 if errors:
     with st.expander(f"{len(errors)} unreadable bundles skipped"):
         st.dataframe(pd.DataFrame(errors, columns=["bundle", "error"]), hide_index=True)
@@ -49,7 +85,8 @@ if frame.empty:
 
 inputs = table.input_columns(frame)
 other_fields = [
-    column for column in table.varying_columns(frame, list(frame.columns))
+    column
+    for column in table.varying_columns(frame, list(frame.columns))
     if column not in inputs and column not in table.SCORE_COLUMNS + ("measurement_id", "score_reason")
 ]
 if jobs.PROTOTYPE_PATH in frame and jobs.PROTOTYPE_PATH not in other_fields:
@@ -61,7 +98,8 @@ with st.sidebar:
         st.rerun()
     statuses = st.multiselect("status", sorted(frame["status"].unique()), default=["complete"])
     extras = st.multiselect(
-        "Extra fields", other_fields,
+        "Extra fields",
+        other_fields,
         help="Add any other varying result.json field as a column, filter and group-by key.",
     )
     st.subheader("Filters")
@@ -80,11 +118,24 @@ with runs_tab:
     st.caption(f"{len(view)} of {len(frame)} measurements")
     if common:
         st.caption("Shared by all shown runs: " + " · ".join(f"`{key}={value}`" for key, value in common.items()))
-    columns = ["score", *varying, "numerator", "denominator", "score_reason",
-               "population.contributing", "population.observations", "created_at_utc", "measurement_id"]
+    columns = [
+        "score",
+        *varying,
+        "numerator",
+        "denominator",
+        "score_reason",
+        "population.contributing",
+        "population.observations",
+        "created_at_utc",
+        "measurement_id",
+    ]
     shown = view[[column for column in dict.fromkeys(columns) if column in view]]
     event = st.dataframe(
-        shown, hide_index=True, on_select="rerun", selection_mode="single-row", key="runs",
+        shown,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="runs",
         column_config={"score": st.column_config.NumberColumn(format="%.4f")},
     )
     selected = list(shown.index[event.selection.rows])
@@ -142,9 +193,11 @@ with aggregate_tab:
     by = st.multiselect("Group by", fields, default=default)
     summary = table.aggregate(view, by)
     st.dataframe(
-        summary, hide_index=True,
-        column_config={name: st.column_config.NumberColumn(format="%.4f")
-                       for name in ("mean", "std", "min", "max", "pooled")},
+        summary,
+        hide_index=True,
+        column_config={
+            name: st.column_config.NumberColumn(format="%.4f") for name in ("mean", "std", "min", "max", "pooled")
+        },
     )
     st.caption("`mean`: unweighted mean of run scores · `pooled`: Σ numerator / Σ denominator.")
     csv_download(summary, "aggregate", "aggregate_csv")
@@ -152,7 +205,8 @@ with aggregate_tab:
     st.subheader("Pivot")
     pivot_options = [column for column in fields if column not in by] or fields
     pivot_column = st.selectbox(
-        "Column", pivot_options,
+        "Column",
+        pivot_options,
         index=pivot_options.index("parameters.quantile") if "parameters.quantile" in pivot_options else 0,
     )
     pivot = table.pivot_means(view, by, pivot_column)
@@ -170,19 +224,23 @@ with coverage_tab:
         "Sidebar Extra fields are included as additional inputs."
     )
     coverage_columns = st.multiselect(
-        "Compare against (column dimensions)", fields,
+        "Compare against (column dimensions)",
+        fields,
         default=["parameters.official_parts_only"] if "parameters.official_parts_only" in fields else [],
         key="coverage_columns",
     )
     fixed_fields = st.multiselect(
-        "Fix inputs (filters)", [field for field in fields if field not in coverage_columns],
+        "Fix inputs (filters)",
+        [field for field in fields if field not in coverage_columns],
         key="coverage_fixed_fields",
     )
     fixed = {}
     for field in fixed_fields:
         fixed[field] = st.selectbox(
-            f"Fixed value: {field}", sorted(frame[field].unique()),
-            accept_new_options=True, key=f"coverage_fixed_{field}",
+            f"Fixed value: {field}",
+            sorted(frame[field].unique()),
+            accept_new_options=True,
+            key=f"coverage_fixed_{field}",
         )
     candidates_frame = table.filter_frame(frame, {field: [value] for field, value in fixed.items()})
     candidates = {}
@@ -194,7 +252,9 @@ with coverage_tab:
             options = sorted(frame[field].unique())
             candidates[field] = st.multiselect(
                 f"{'Column' if field in coverage_columns else 'Row'} values: {field}",
-                options, default=observed or options, accept_new_options=True,
+                options,
+                default=observed or options,
+                accept_new_options=True,
                 key=f"coverage_values_{field}",
             )
     st.caption(
@@ -233,7 +293,7 @@ with coverage_tab:
                 key=f"coverage_missing_{selection_key}",
             )
             chosen = missing.iloc[missing_event.selection.rows].to_dict("records")
-            checkout = Path(__file__).resolve().parents[3]
+            checkout = Path(__file__).resolve().parents[2]
             python = st.text_input(
                 "Evaluation Python executable",
                 value=os.environ.get("METRIC_PYTHON", str(checkout / ".venv/bin/python")),
@@ -247,7 +307,7 @@ with coverage_tab:
                     st.caption(f"Slurm nodelist: `{node}` (not editable; node-local checkout and caches).")
                     for index, configuration in enumerate(chosen, start=1):
                         try:
-                            arguments = jobs.measurement_arguments(configuration, frame)
+                            arguments = jobs.measurement_arguments(configuration, frame, root=root)
                             prior = jobs.submission_record(root, arguments)
                             if prior is not None:
                                 raise ValueError(
@@ -255,9 +315,9 @@ with coverage_tab:
                                     f"Receipt: {jobs.submission_path(root, arguments)}"
                                 )
                             plans.append(shlex.join(jobs.slurm_command(checkout, root, node, arguments)))
-                        except (OSError, ValueError) as error:
+                        except (CatalogError, OSError, ValueError) as error:
                             plan_errors.append(f"Selection {index}: {error}")
-                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                except (CatalogError, OSError, ValueError, subprocess.SubprocessError) as error:
                     plan_errors.append(f"Slurm is unavailable on this host: {error}")
             if plans:
                 st.code("\n".join(plans), language="bash")

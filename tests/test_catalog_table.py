@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from segmentation.analysis.metrics import catalog_table as table
+from segmentation.catalog import table as table
 
 
 def record(measurement_id, metric="consistency", quantile=0.8, value=0.5, numerator=1, denominator=2, **parameters):

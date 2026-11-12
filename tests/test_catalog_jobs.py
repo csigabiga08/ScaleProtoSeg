@@ -1,6 +1,7 @@
 """CPU-only planning and mocked Slurm submission tests; no jobs are launched."""
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -9,8 +10,10 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from segmentation.analysis.metrics import catalog_jobs as jobs
-from segmentation.analysis.metrics import catalog_table as table
+from segmentation.catalog import jobs as jobs
+from segmentation.catalog import table as table
+from segmentation.catalog.models import model_snapshot
+from segmentation.catalog.models import register_model
 
 
 class CatalogJobsTest(unittest.TestCase):
@@ -23,8 +26,27 @@ class CatalogJobsTest(unittest.TestCase):
         (self.root / "scripts/run_metric.slurm").touch()
         self.checkpoint = self.root / "prototype with spaces.pth"
         self.group = self.root / "group.pth"
-        self.checkpoint.touch()
-        self.group.touch()
+        self.checkpoint.write_bytes(b"prototype")
+        self.group.write_bytes(b"group")
+        self.main_registration = register_model(
+            root=self.root,
+            name="model",
+            architecture="ScaleProtoSeg",
+            dataset="cityscapes",
+            config={"stage": "push", "grouped": False},
+            checkpoint=self.checkpoint,
+        )
+        self.group_registration = register_model(
+            root=self.root,
+            name="group",
+            architecture="ScaleProtoSeg",
+            dataset="cityscapes",
+            config={"stage": "group", "grouped": True},
+            checkpoint=self.group,
+        )
+        environment = patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.record = {
             "measurement_id": "existing",
             "metric": "consistency",
@@ -48,6 +70,8 @@ class CatalogJobsTest(unittest.TestCase):
             },
             "scores": {"consistency": {"value": 0.5}},
         }
+        self.record["model"] = model_snapshot(self.main_registration)
+        self.record["grouping_model"] = model_snapshot(self.group_registration)
         self.frame = table.records_frame([self.record])
         self.configuration = {field: self.frame.iloc[0][field] for field in table.input_columns(self.frame)}
         self.configuration["parameters.official_parts_only"] = "true"
@@ -56,22 +80,21 @@ class CatalogJobsTest(unittest.TestCase):
         arguments = jobs.measurement_arguments(self.configuration, self.frame)
         self.assertEqual(arguments[0], "consistency")
         overrides = {key: json.loads(value) for key, value in (arg.split("=", 1) for arg in arguments[1:])}
-        self.assertEqual(overrides["checkpoint"], str(self.checkpoint))
-        self.assertEqual(overrides["group_checkpoint"], str(self.group))
+        self.assertEqual(overrides["model"], self.main_registration["model_id"])
+        self.assertEqual(overrides["grouping_model"], self.group_registration["model_id"])
         self.assertIs(overrides["official_parts_only"], True)
         self.assertEqual(overrides["quantile"], 0.8)
         self.assertNotIn("checkpoint_path", overrides)
 
-    def test_planner_rejects_ambiguous_checkpoint_and_accepts_explicit_path(self):
-        other = self.frame.copy()
-        other[jobs.PROTOTYPE_PATH] = str(self.group)
-        ambiguous = pd.concat([self.frame, other])
-        with self.assertRaisesRegex(ValueError, "No unique prototype checkpoint"):
-            jobs.measurement_arguments(self.configuration, ambiguous)
+    def test_planner_rejects_raw_paths_and_unregistered_legacy_inputs(self):
         explicit = {**self.configuration, jobs.PROTOTYPE_PATH: str(self.checkpoint)}
-        self.assertIn(f"checkpoint={json.dumps(str(self.checkpoint))}", jobs.measurement_arguments(explicit, ambiguous))
-        with self.assertRaisesRegex(ValueError, "Checkpoint does not exist"):
-            jobs.measurement_arguments({**explicit, jobs.PROTOTYPE_PATH: str(self.root / "absent")}, self.frame)
+        with self.assertRaisesRegex(ValueError, "cannot be set"):
+            jobs.measurement_arguments(explicit, self.frame)
+        with self.assertRaisesRegex(ValueError, "registered model"):
+            jobs.measurement_arguments(
+                {**self.configuration, "model.registration_id": table.MISSING},
+                self.frame,
+            )
 
     def test_planner_rejects_invalid_or_unrepresentable_configurations(self):
         invalid = (
@@ -88,15 +111,15 @@ class CatalogJobsTest(unittest.TestCase):
         for overrides in invalid:
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
                 jobs.measurement_arguments(
-                    {**self.configuration, jobs.PROTOTYPE_PATH: str(self.checkpoint), **overrides},
+                    {**self.configuration, **overrides},
                     self.frame,
                 )
 
     def test_stability_uses_its_checkpoint_option_and_does_not_ignore_threshold(self):
-        config = {**self.configuration, "metric": "stability", jobs.PROTOTYPE_PATH: str(self.checkpoint)}
+        config = {**self.configuration, "metric": "stability"}
         config.update({"parameters.threshold": table.MISSING, "parameters.std_dev": "0.2", "parameters.seed": "7"})
         arguments = jobs.measurement_arguments(config, self.frame)
-        self.assertIn(f"checkpoint_path={json.dumps(str(self.checkpoint))}", arguments)
+        self.assertIn(f"model={json.dumps(self.main_registration['model_id'])}", arguments)
         self.assertIn("seed=7", arguments)
         with self.assertRaises(ValueError):
             jobs.measurement_arguments({**config, "parameters.threshold": "0.8"}, self.frame)

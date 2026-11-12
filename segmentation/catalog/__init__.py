@@ -9,7 +9,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 from pydantic import ValidationError
 
-from segmentation.analysis.metrics.schema import Measurement
+from segmentation.catalog.schema import Measurement
 
 
 OBSERVATION_KEY = ("sample_id", "class_id", "prototype_id", "repetition")
@@ -21,7 +21,7 @@ class CatalogError(RuntimeError):
 
 def resolve_catalog_root(checkout=None):
     """Resolve the required catalog root from the environment or this checkout's .env."""
-    checkout = Path(checkout) if checkout is not None else Path(__file__).resolve().parents[3]
+    checkout = Path(checkout) if checkout is not None else Path(__file__).resolve().parents[2]
     configured_file_value = dotenv_values(checkout / ".env").get("MEASUREMENT_CATALOG_ROOT")
     if configured_file_value is not None:
         os.environ.setdefault("MEASUREMENT_CATALOG_ROOT", configured_file_value)

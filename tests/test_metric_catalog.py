@@ -12,15 +12,16 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-from segmentation.analysis.metrics.catalog import (
+from segmentation.catalog import (
     CatalogError,
     iter_measurements,
     load_measurement,
     load_observations,
     resolve_catalog_root,
 )
-from segmentation.analysis.metrics.output import MetricOutput
-from segmentation.analysis.metrics.schema import MeasurementOutput
+from segmentation.catalog.output import MetricOutput
+from segmentation.catalog.models import register_model
+from segmentation.catalog.schema import MeasurementOutput
 
 
 class MetricCatalogTests(unittest.TestCase):
@@ -31,6 +32,14 @@ class MetricCatalogTests(unittest.TestCase):
         self.root.mkdir()
         self.checkpoint = Path(self.temporary.name) / "checkpoint.pth"
         self.checkpoint.write_bytes(b"tiny checkpoint payload")
+        self.registration = register_model(
+            root=self.root,
+            name="fixture",
+            architecture="ProtoSeg",
+            config={"stage": "push"},
+            dataset="pascal",
+            checkpoint=self.checkpoint,
+        )
 
     def make_output(self, **parameters):
         return MetricOutput(
@@ -38,6 +47,7 @@ class MetricCatalogTests(unittest.TestCase):
             self.checkpoint,
             "pascal",
             model_name="fixture",
+            model_ref=self.registration["model_id"],
             training_phase="push",
             protocol={
                 "metric": "consistency",
@@ -52,7 +62,13 @@ class MetricCatalogTests(unittest.TestCase):
         output = self.make_output()
         output.set_candidates(["used", "other"])
         output.add_observation(
-            sample_id="used", class_id=3, prototype_id=12, repetition=0, part_1=1, part_2=None, part_3=0,
+            sample_id="used",
+            class_id=3,
+            prototype_id=12,
+            repetition=0,
+            part_1=1,
+            part_2=None,
+            part_3=0,
         )
         output.finish(value=1.0, numerator=1, denominator=1)
         return output.path
@@ -82,7 +98,7 @@ class MetricCatalogTests(unittest.TestCase):
                 resolve_catalog_root(checkout=Path(self.temporary.name))
         with (
             patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}),
-            patch("segmentation.analysis.metrics.catalog.os.access", return_value=False),
+            patch("segmentation.catalog.os.access", return_value=False),
         ):
             with self.assertRaisesRegex(CatalogError, "not writable"):
                 resolve_catalog_root(checkout=Path(self.temporary.name))
@@ -92,7 +108,7 @@ class MetricCatalogTests(unittest.TestCase):
         dotenv.write_text(
             f'CATALOG_PARENT="{self.root.parent}"\n'
             'MEASUREMENT_CATALOG_ROOT="${CATALOG_PARENT}/catalog" # shared output\n'
-            'UNRELATED_SETTING=do-not-load\n'
+            "UNRELATED_SETTING=do-not-load\n"
         )
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(resolve_catalog_root(checkout=dotenv.parent), self.root.resolve())
@@ -102,7 +118,7 @@ class MetricCatalogTests(unittest.TestCase):
     def test_helpers_import_without_torch_or_settings(self):
         code = (
             "import sys; "
-            "from segmentation.analysis.metrics import catalog, output; "
+            "from segmentation import catalog; from segmentation.catalog import output; "
             "assert 'torch' not in sys.modules; "
             "assert 'settings' not in sys.modules"
         )
@@ -115,7 +131,13 @@ class MetricCatalogTests(unittest.TestCase):
             self.assertEqual(output.result.status, "running")
             output.set_candidates(["missing", "empty", "used"])
             output.add_observation(
-                sample_id="used", class_id=3, prototype_id=12, repetition=0, part_1=1, part_2=None, part_3=0,
+                sample_id="used",
+                class_id=3,
+                prototype_id=12,
+                repetition=0,
+                part_1=1,
+                part_2=None,
+                part_3=0,
             )
             output.set_selected_prototype_ids([12, 19])
             output.finish(value=0.5, numerator=1, denominator=2)
@@ -139,10 +161,20 @@ class MetricCatalogTests(unittest.TestCase):
             self.assertEqual(artifact["bytes"], (bundle / "observations.csv").stat().st_size)
             self.assertEqual(artifact["sha256"], hashlib.sha256((bundle / "observations.csv").read_bytes()).hexdigest())
             _result, rows = load_observations(bundle)
-            self.assertEqual(rows, [{
-                "sample_id": "used", "class_id": "3", "prototype_id": "12", "repetition": "0",
-                "part_1": "1", "part_2": "", "part_3": "0",
-            }])
+            self.assertEqual(
+                rows,
+                [
+                    {
+                        "sample_id": "used",
+                        "class_id": "3",
+                        "prototype_id": "12",
+                        "repetition": "0",
+                        "part_1": "1",
+                        "part_2": "",
+                        "part_3": "0",
+                    }
+                ],
+            )
 
     def test_nonfinite_score_is_null_with_reason(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
@@ -152,6 +184,22 @@ class MetricCatalogTests(unittest.TestCase):
             score = load_measurement(output.path)["scores"]["consistency"]
             self.assertIsNone(score["value"])
             self.assertEqual(score["reason"], "no eligible prototype observations")
+
+    def test_implicit_grouping_rejects_weights_not_matching_the_main_registration(self):
+        other_checkpoint = Path(self.temporary.name) / "other.pth"
+        other_checkpoint.write_bytes(b"unreferenced weights")
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            with self.assertRaisesRegex(CatalogError, "referenced registration"):
+                output.register_input("group_checkpoint", other_checkpoint)
+            self.assertIsNone(output.result.grouping_model)
+            self.assertNotIn("group_checkpoint", output.result.model.inputs)
+            output.register_input("group_checkpoint", self.checkpoint)
+            self.assertEqual(
+                output.result.grouping_model.registration_id,
+                self.registration["model_id"],
+            )
+            self.assertNotIn("group_checkpoint", output.result.grouping_model.inputs)
 
     def test_metadata_requires_its_sections_and_artifact_for_complete_records(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
@@ -225,7 +273,13 @@ class MetricCatalogTests(unittest.TestCase):
             output = self.make_output()
             output.set_candidates(["first", "later"])
             output.add_observation(
-                sample_id="first", class_id=1, prototype_id=4, repetition=0, part_1=0, part_2=1, part_3=None,
+                sample_id="first",
+                class_id=1,
+                prototype_id=4,
+                repetition=0,
+                part_1=0,
+                part_2=1,
+                part_3=None,
             )
             output.fail(RuntimeError("fixture failed"))
             record, rows = load_observations(output.path)

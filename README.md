@@ -196,6 +196,7 @@ by `MEASUREMENT_CATALOG_ROOT`:
 
 ```text
 <catalog-root>/
+  models.sqlite3
   measurements/<measurement-uuid>/
     result.json
     observations.csv
@@ -204,7 +205,8 @@ by `MEASUREMENT_CATALOG_ROOT`:
 Set `MEASUREMENT_CATALOG_ROOT` in the job environment or in this checkout's ignored
 `.env` file. The root must already exist and be writable; metrics do not fall back
 to `RESULTS_DIR`, and there is no `--output-dir` or catalog-root command-line option.
-`RESULTS_DIR` still locates stage-selected checkpoints and relative group names.
+Measurement inputs must reference registered models; checkpoint paths and training
+stages are not metric overrides.
 Catalog configuration uses `python-dotenv` quoting, comments, and interpolation;
 an exported root takes precedence, and catalog lookup does not load other settings
 into the environment. Metadata validation uses Pydantic, pinned in both dependency
@@ -243,6 +245,40 @@ fields as bare Hydra `key=value` overrides (not positional arguments or `--` fla
 The following Pascal examples select exact evaluated checkpoints and a prototype
 filter checkpoint:
 
+### Registering checkpoints
+
+Architecture schemas live in `segmentation/catalog/architectures.py`, without
+importing model code or Torch. Add a versioned schema there for a new architecture;
+retain existing versions so old registrations stay readable. Print the schemas with
+`python -m segmentation.catalog.cli architectures`. Configs reject unknown fields.
+`ProtoSeg` requires `stage`; `ScaleProtoSeg` also requires the explicit `grouped`
+boolean. Optional backbone, prototype shape, scale/group counts describe known
+configuration, not guessed checkpoint-path conventions.
+
+Create a config JSON file, for example `{"stage": "push", "grouped": false}`, then:
+
+```bash
+python -m segmentation.catalog.cli register-model \
+  --name scaleproto-pascal --architecture ScaleProtoSeg --dataset pascal \
+  --config model-config.json --seed 0 --tags '{"experiment":"baseline"}' \
+  --checkpoint /absolute/path/to/push_last.pth
+python -m segmentation.catalog.cli list-models
+```
+
+Register the grouping checkpoint separately, with its own name and configuration.
+Registration assigns a UUID and enforces unique names and file SHA-256 hashes
+transactionally in SQLite, including concurrent registrations. Re-registering a
+copied checkpoint is rejected. Names are lowercase letters/digits plus `._-`, must
+start with a letter/digit, and cannot themselves be UUIDs. A training seed may be
+unknown (`null`, when omitted); tags are universal string values.
+
+Files are referenced, never moved or copied. After moving a file, use
+`python -m segmentation.catalog.cli relocate-model MODEL /new/checkpoint.pth`;
+its contents must match the registered hash. Both metric loaders verify contents.
+The webapp's **Registered models** section lists and registers checkpoints.
+Registration metadata and architecture-config fields are available as filters and
+grouping dimensions, separately from metric parameters.
+
 ### Pascal left/right part merging
 
 Set `merge_left_right_parts=true` for either metric to treat Pascal's 54
@@ -255,26 +291,25 @@ labels for all 54 pairs.
 
 ```bash
 python -m segmentation.analysis.metrics.consistency \
-  model_name=scaleproto_pascal training_phase=push data_type=pascal \
-  checkpoint=/data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
-  group_checkpoint=/data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal/checkpoints/th-0.05-nopush-group_last.pth \
+  model=scaleproto-pascal grouping_model=scaleproto-pascal-grouped data_type=pascal \
   quantile=0.8 threshold=0.8 require_semantic_match=true \
   exclude_background_centroid=true merge_left_right_parts=true
 
 python -m segmentation.analysis.metrics.stability \
-  model_name=scaleproto_pascal training_phase=push data_type=pascal \
-  checkpoint_path=/data/shared/scaleprotoseg/checkpoints/scaleproto_pascal/checkpoints/push_last.pth \
-  group_checkpoint=/data/shared/scaleprotoseg/checkpoints/group_scaleproto_pascal/checkpoints/th-0.05-nopush-group_last.pth \
+  model=scaleproto-pascal grouping_model=scaleproto-pascal-grouped data_type=pascal \
   quantile=0.8 std_dev=0.2 seed=0 require_semantic_match=true \
   exclude_background_centroid=true merge_left_right_parts=true
 ```
 
-The common required overrides are `model_name`, `training_phase`, and `data_type`.
-Without an explicit checkpoint override, each calculator selects the checkpoint for
-that model and phase under `RESULTS_DIR`. Consistency uses `checkpoint=...` to select
-an exact evaluated checkpoint; stability uses `checkpoint_path=...`. Either accepts
-`group_checkpoint=...` for an exact prototype-filter checkpoint or `group_name=...`
-to resolve the existing group checkpoint under `RESULTS_DIR`. The metric-specific
+The common required overrides are `model` (UUID or unique name) and `data_type`.
+`grouping_model` optionally references another registered model for prototype
+selection; it may reference the main model itself, in which case it is loaded once.
+If omitted for consistency, the main model's own group projection is used when
+present, and its registration is recorded in both roles. Stability requires an
+explicit grouping reference to enable group-based filtering.
+Datasets must match, and a grouping model must actually have a group projection.
+Measurements snapshot both registrations and their checkpoint identities.
+The metric-specific
 protocol values are also Hydra overrides: consistency accepts `quantile` and
 `threshold`, while stability accepts `quantile`, `std_dev`, and `seed` (default 0).
 Part selection and centroid behavior are controlled by `official_parts_only`,
@@ -304,7 +339,7 @@ List complete measurements without opening observation tables, checkpoints, or
 model code:
 
 ```bash
-.venv/bin/python -m segmentation.analysis.metrics.catalog_cli list \
+.venv/bin/python -m segmentation.catalog.cli list \
   --metric consistency --dataset pascal --quantile 0.8 \
   --variant protocol.consistency.threshold=0.8
 ```
@@ -315,7 +350,7 @@ non-complete status filters also require that opt-in.
 Validate a record or all selected records:
 
 ```bash
-.venv/bin/python -m segmentation.analysis.metrics.catalog_cli validate <measurement-id>
+.venv/bin/python -m segmentation.catalog.cli validate <measurement-id>
 ```
 
 `validate` checks metadata, the observations artifact size and hash, and the
@@ -329,7 +364,7 @@ read access; launching jobs also needs write access. Start it from the repositor
 root and forward the port over SSH:
 
 ```bash
-.venv/bin/python -m streamlit run segmentation/analysis/metrics/catalog_app.py \
+.venv/bin/python -m streamlit run segmentation/catalog/app.py \
   --server.headless true --server.port 8501
 ```
 

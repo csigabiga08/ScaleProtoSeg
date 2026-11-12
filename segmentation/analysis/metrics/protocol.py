@@ -1,21 +1,18 @@
 """Typed run inputs and serializers for metric protocols."""
 
-import os
-from pathlib import Path
+from functools import cached_property
 from typing import Dict, Literal, Mapping, Optional, Sequence
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class MetricRunInput(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="forbid", allow_inf_nan=False)
 
-    model_name: str
-    training_phase: str
+    model: str = Field(min_length=1)
+    grouping_model: Optional[str] = None
     data_type: Literal["cityscapes", "pascal"]
-    quantile: float = 0.8
-    group_name: Optional[str] = None
-    group_checkpoint: Optional[str] = None
+    quantile: float = Field(default=0.8, ge=0, le=1)
     official_parts_only: bool = False
     require_semantic_match: bool = False
     exclude_background_centroid: bool = False
@@ -31,34 +28,51 @@ class MetricRunInput(BaseModel):
             raise ValueError("merge_left_right_parts is supported only for pascal")
         return self
 
-    def _checkpoint_override(self) -> Optional[str]:
-        return None
+    @cached_property
+    def registration(self):
+        from segmentation.catalog import CatalogError
+        from segmentation.catalog.models import find_model
+
+        record = find_model(self.model, verify=True)
+        if record["dataset"] != self.data_type:
+            raise CatalogError("Evaluation dataset must match the registered model dataset")
+        return record
+
+    @cached_property
+    def group_registration(self):
+        if self.grouping_model is None:
+            return None
+        from segmentation.catalog import CatalogError
+        from segmentation.catalog.models import find_model
+
+        record = (
+            self.registration
+            if self.grouping_model
+            in (
+                self.registration["model_id"],
+                self.registration["name"],
+            )
+            else find_model(self.grouping_model, verify=True)
+        )
+        if record["dataset"] != self.data_type:
+            raise CatalogError("Grouping model dataset must match the evaluation dataset")
+        return record
 
     @property
-    def resolved_checkpoint_path(self) -> str:
-        override = self._checkpoint_override()
-        if override is not None:
-            return os.fspath(Path(override).expanduser())
+    def model_name(self):
+        return self.registration["name"]
 
-        model_path = Path(os.environ["RESULTS_DIR"]) / self.model_name
-        if self.training_phase == "pruned":
-            path = model_path / "pruned/checkpoints/push_last.pth"
-        else:
-            path = model_path / f"checkpoints/{self.training_phase}_last.pth"
-        return os.fspath(path)
+    @property
+    def training_phase(self):
+        return self.registration["config"]["stage"]
+
+    @property
+    def resolved_checkpoint_path(self):
+        return self.registration["checkpoint"]["path"]
 
     @property
     def resolved_group_checkpoint_path(self) -> Optional[str]:
-        if self.group_checkpoint is not None:
-            return os.fspath(Path(self.group_checkpoint).expanduser())
-        if self.group_name is None:
-            return None
-        path = (
-            Path(os.environ["RESULTS_DIR"])
-            / self.group_name
-            / "checkpoints/th-0.05-nopush-group_last.pth"
-        )
-        return os.fspath(path)
+        return self.group_registration["checkpoint"]["path"] if self.group_registration else None
 
     def _protocol_parts(
         self,
@@ -76,8 +90,7 @@ class MetricRunInput(BaseModel):
             if left_right_part_groups is None:
                 raise ValueError("Merged Pascal parts require their canonical group definitions")
             parts["left_right_part_groups"] = {
-                name: [dict(group) for group in groups]
-                for name, groups in left_right_part_groups.items()
+                name: [dict(group) for group in groups] for name, groups in left_right_part_groups.items()
             }
         return parts
 
@@ -94,11 +107,7 @@ class MetricRunInput(BaseModel):
 
 
 class ConsistencyRunInput(MetricRunInput):
-    checkpoint: Optional[str] = None
-    threshold: float = 0.8
-
-    def _checkpoint_override(self) -> Optional[str]:
-        return self.checkpoint
+    threshold: float = Field(default=0.8, ge=0, le=1)
 
     def to_protocol(
         self,
@@ -114,9 +123,7 @@ class ConsistencyRunInput(MetricRunInput):
             semantic_id_to_evaluation_id,
             evaluation_class_id_to_label,
         )
-        classes["excluded_evaluation_class_ids"] = list(
-            excluded_evaluation_class_ids
-        )
+        classes["excluded_evaluation_class_ids"] = list(excluded_evaluation_class_ids)
         return {
             "metric": "consistency",
             "quantile": self.quantile,
@@ -131,12 +138,8 @@ class ConsistencyRunInput(MetricRunInput):
 
 
 class StabilityRunInput(MetricRunInput):
-    checkpoint_path: Optional[str] = None
-    std_dev: float = 0.2
+    std_dev: float = Field(default=0.2, ge=0)
     seed: int = 0
-
-    def _checkpoint_override(self) -> Optional[str]:
-        return self.checkpoint_path
 
     def to_protocol(
         self,
@@ -158,10 +161,7 @@ class StabilityRunInput(MetricRunInput):
             "stability": {
                 "standard_deviation": self.std_dev,
                 "seed": self.seed,
-                "aggregation": (
-                    "unweighted mean of exact all-part equality per paired "
-                    "sample/class/prototype row"
-                ),
+                "aggregation": ("unweighted mean of exact all-part equality per paired " "sample/class/prototype row"),
             },
             "observation_columns": list(observation_columns),
         }

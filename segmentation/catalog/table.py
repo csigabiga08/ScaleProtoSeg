@@ -9,8 +9,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 import pandas as pd
 
-from segmentation.analysis.metrics.catalog import CatalogError, read_result, validate_result
-
+from segmentation.catalog import CatalogError, read_result, validate_result
 
 MISSING = "∅"
 IDENTITY_INPUTS = (
@@ -18,7 +17,8 @@ IDENTITY_INPUTS = (
     "dataset.name",
     "model.label",
     "model.training_stage",
-    "model.inputs.group_checkpoint.path",
+    "model.registration_id",
+    "grouping_model.registration_id",
 )
 SCORE_COLUMNS = ("score", "numerator", "denominator")
 NOT_MEASURED = "Not measured"
@@ -34,7 +34,7 @@ EXCLUDED_PREFIXES = (
 
 def read_catalog_root(checkout=None):
     """Resolve MEASUREMENT_CATALOG_ROOT like the writers do, but require read access only."""
-    checkout = Path(checkout) if checkout is not None else Path(__file__).resolve().parents[3]
+    checkout = Path(checkout) if checkout is not None else Path(__file__).resolve().parents[2]
     configured = os.environ.get("MEASUREMENT_CATALOG_ROOT") or dotenv_values(checkout / ".env").get(
         "MEASUREMENT_CATALOG_ROOT"
     )
@@ -128,7 +128,21 @@ def records_frame(records):
 def input_columns(frame):
     """Run inputs: model/dataset identity followed by every recorded parameter."""
     parameters = sorted(column for column in frame.columns if column.startswith("parameters."))
-    return list(IDENTITY_INPUTS) + parameters
+    model_fields = sorted(
+        column
+        for column in frame.columns
+        if column not in IDENTITY_INPUTS
+        and (
+            column.startswith(("model.config.", "model.tags.", "grouping_model.config.", "grouping_model.tags."))
+            or column
+            in {
+                f"{role}.{field}"
+                for role in ("model", "grouping_model")
+                for field in ("name", "architecture", "schema_version", "seed", "training_stage")
+            }
+        )
+    )
+    return list(IDENTITY_INPUTS) + model_fields + parameters
 
 
 def varying_columns(frame, columns):
@@ -157,8 +171,7 @@ def boolean_columns(frame, columns):
     """Fields containing boolean display values, optionally alongside missing values."""
     booleans = {"false", "true"}
     return [
-        column for column in columns
-        if set(frame[column]) & booleans and set(frame[column]) <= booleans | {MISSING}
+        column for column in columns if set(frame[column]) & booleans and set(frame[column]) <= booleans | {MISSING}
     ]
 
 
@@ -174,9 +187,7 @@ def compare_flag(frame, flag, fields):
     result.columns = pd.MultiIndex.from_tuples([("score", "Off"), ("score", "On")])
     result = result.reset_index()
     # Input names belong on leaf headers so their borders can be dragged to resize.
-    result.columns = pd.MultiIndex.from_tuples(
-        [("", column) for column in by] + [("score", "Off"), ("score", "On")]
-    )
+    result.columns = pd.MultiIndex.from_tuples([("", column) for column in by] + [("score", "Off"), ("score", "On")])
     return result
 
 
@@ -252,9 +263,7 @@ def aggregate(frame, by):
 def pivot_means(frame, rows, column):
     """Mean run score per (rows, column value), plus the unweighted mean across the column."""
     rows = list(dict.fromkeys(["metric", *[row for row in rows if row != column]]))
-    table = aggregate(frame, rows + [column]).pivot_table(
-        index=rows, columns=column, values="mean", aggfunc="first"
-    )
+    table = aggregate(frame, rows + [column]).pivot_table(index=rows, columns=column, values="mean", aggfunc="first")
     table.columns = [str(value) for value in table.columns]
     table[f"mean over {column}"] = table.mean(axis=1, skipna=False)
     return table.reset_index()
