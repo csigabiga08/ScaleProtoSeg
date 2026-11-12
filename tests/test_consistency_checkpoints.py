@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, call, patch
 
 from pydantic import ValidationError
 
-from segmentation.analysis.metrics import consistency
+from segmentation.analysis.metrics import consistency, pipeline
 from segmentation.catalog import CatalogError
 from segmentation.analysis.metrics.protocol import ConsistencyRunInput
 
@@ -36,11 +36,14 @@ class ConsistencyCheckpointTests(unittest.TestCase):
             checkpoint.parent.mkdir(parents=True)
             checkpoint.write_bytes(b"fixture checkpoint bytes")
             with (
-                patch.dict(os.environ, {
-                    "RESULTS_DIR": str(root),
-                    "MEASUREMENT_CATALOG_ROOT": str(root / "missing-catalog"),
-                }),
-                patch.object(consistency, "load_model_checkpoint") as load,
+                patch.dict(
+                    os.environ,
+                    {
+                        "RESULTS_DIR": str(root),
+                        "MEASUREMENT_CATALOG_ROOT": str(root / "missing-catalog"),
+                    },
+                ),
+                patch.object(pipeline, "load_model_checkpoint") as load,
             ):
                 with self.assertRaises(CatalogError):
                     consistency.run_consistency(run_input())
@@ -60,11 +63,14 @@ class ConsistencyCheckpointTests(unittest.TestCase):
             catalog_root = root / "catalog"
             catalog_root.mkdir()
             with (
-                patch.dict(os.environ, {
-                    "RESULTS_DIR": str(root),
-                    "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
-                }),
-                patch.object(consistency, "load_model_checkpoint", side_effect=ValueError("bad checkpoint")) as load,
+                patch.dict(
+                    os.environ,
+                    {
+                        "RESULTS_DIR": str(root),
+                        "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
+                    },
+                ),
+                patch.object(pipeline, "load_model_checkpoint", side_effect=ValueError("bad checkpoint")) as load,
             ):
                 with self.assertRaisesRegex(ValueError, "bad checkpoint"):
                     consistency.run_consistency(run_input())
@@ -79,17 +85,31 @@ class ConsistencyCheckpointTests(unittest.TestCase):
     def test_checkpoint_selection_from_typed_input(self):
         cases = [
             ({}, False, ["model/checkpoints/push_last.pth"], None),
-            ({"group_name": "group"}, False,
-             ["model/checkpoints/push_last.pth", "group/checkpoints/th-0.05-nopush-group_last.pth"], "group"),
+            (
+                {"group_name": "group"},
+                False,
+                ["model/checkpoints/push_last.pth", "group/checkpoints/th-0.05-nopush-group_last.pth"],
+                "group",
+            ),
             ({"checkpoint": "custom/best.pth"}, False, ["custom/best.pth"], None),
             ({"checkpoint": "custom/best.pth"}, True, ["custom/best.pth"], "model"),
-            ({"group_name": "group", "group_checkpoint": "custom/group.pth"}, False,
-             ["model/checkpoints/push_last.pth", "custom/group.pth"], "group"),
-            ({"checkpoint": "custom/best.pth", "group_checkpoint": "custom/group.pth"}, True,
-             ["custom/best.pth", "custom/group.pth"], "group"),
+            (
+                {"group_name": "group", "group_checkpoint": "custom/group.pth"},
+                False,
+                ["model/checkpoints/push_last.pth", "custom/group.pth"],
+                "group",
+            ),
+            (
+                {"checkpoint": "custom/best.pth", "group_checkpoint": "custom/group.pth"},
+                True,
+                ["custom/best.pth", "custom/group.pth"],
+                "group",
+            ),
         ]
         for overrides, grouped, paths, filter_source in cases:
-            with self.subTest(overrides=overrides, grouped=grouped), tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
+            with self.subTest(overrides=overrides, grouped=grouped), tempfile.TemporaryDirectory(
+                dir=Path.cwd()
+            ) as root:
                 root = Path(root)
                 overrides = dict(overrides)
                 catalog_root = root / "catalog"
@@ -113,18 +133,19 @@ class ConsistencyCheckpointTests(unittest.TestCase):
                     del model.group_projection
                 group = MagicMock()
                 with (
-                    patch.dict(os.environ, {
-                        "RESULTS_DIR": str(root),
-                        "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
-                    }),
-                    patch.object(consistency, "load_model_checkpoint", side_effect=[model, group]) as load,
-                    patch.object(consistency, "proto_filter", return_value=[1]) as proto_filter,
-                    patch.object(consistency, "PatchClassificationDataset", side_effect=DatasetReached),
+                    patch.dict(
+                        os.environ,
+                        {
+                            "RESULTS_DIR": str(root),
+                            "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
+                        },
+                    ),
+                    patch.object(pipeline, "load_model_checkpoint", side_effect=[model, group]) as load,
+                    patch.object(pipeline, "proto_filter", return_value=[1]) as proto_filter,
+                    patch.object(pipeline, "PatchClassificationDataset", side_effect=DatasetReached),
                 ):
                     with self.assertRaises(DatasetReached):
-                        consistency.run_consistency(
-                            run_input(data_type="cityscapes", **overrides)
-                        )
+                        consistency.run_consistency(run_input(data_type="cityscapes", **overrides))
                     self.assertEqual(load.call_args_list, [call(os.path.join(root, p)) for p in paths])
                     if filter_source is None:
                         proto_filter.assert_not_called()

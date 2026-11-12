@@ -2,6 +2,7 @@
 
 import json
 import os
+from functools import partial
 from pathlib import Path
 import tempfile
 import unittest
@@ -14,9 +15,12 @@ import torch
 from PIL import Image
 from pydantic import ValidationError
 
-from segmentation.analysis.metrics import consistency
+from segmentation import constants
+from segmentation.analysis.metrics import consistency, helpers, pipeline
 from segmentation.analysis.metrics.protocol import ConsistencyRunInput
 from segmentation.data.cityscapes_parts import filter_official_parts
+
+part_intersect = partial(helpers.part_intersect, max_parts=constants.MAX_PARTS_PASCAL, missing_parts_nan=True)
 
 
 def run_input(model_name="model", training_phase="push", data_type="pascal", **overrides):
@@ -29,9 +33,7 @@ def run_input(model_name="model", training_phase="push", data_type="pascal", **o
 
 
 def hydra_config_directory():
-    return str(
-        (Path(consistency.__file__).resolve().parent / "../../../config/hydra/metrics").resolve()
-    )
+    return str((Path(consistency.__file__).resolve().parent / "../../../config/hydra/metrics").resolve())
 
 
 def latest_record(root):
@@ -63,7 +65,7 @@ class ConsistencyPartsTests(unittest.TestCase):
 
     def test_pascal_observations_use_one_based_evaluator_class_ids(self):
         output = MagicMock()
-        max_parts = consistency.MAX_PARTS_PASCAL
+        max_parts = constants.MAX_PARTS_PASCAL
         row = [np.nan] * (max_parts + 1) + [7, "aeroplane", "sample"]
         consistency._add_observations(output, [row], {1: "aeroplane"}, max_parts)
         observation = output.add_observation.call_args.kwargs
@@ -75,11 +77,11 @@ class ConsistencyPartsTests(unittest.TestCase):
             require_semantic_match=True,
             exclude_background_centroid=True,
         ).to_protocol(
-            semantic_id_to_evaluation_id=consistency.PASCAL_ID_MAPPING,
+            semantic_id_to_evaluation_id=constants.PASCAL_ID_MAPPING,
             evaluation_class_id_to_label={"2": "aeroplane"},
             valid_part_ids=range(1, max_parts + 1),
             observation_columns=[f"part_{part_id}" for part_id in range(max_parts + 1)],
-            excluded_evaluation_class_ids=consistency.PASCAL_FILTER_CLASS,
+            excluded_evaluation_class_ids=constants.PASCAL_FILTER_CLASS,
         )
         self.assertEqual(
             protocol,
@@ -94,7 +96,7 @@ class ConsistencyPartsTests(unittest.TestCase):
                     "merge_left_right_parts": False,
                 },
                 "classes": {
-                    "semantic_id_to_evaluation_id": consistency.PASCAL_ID_MAPPING,
+                    "semantic_id_to_evaluation_id": constants.PASCAL_ID_MAPPING,
                     "evaluation_class_id_to_label": {"2": "aeroplane"},
                     "background_evaluation_class_id": 1,
                     "excluded_evaluation_class_ids": [1, 5, 10, 12, 19],
@@ -109,15 +111,15 @@ class ConsistencyPartsTests(unittest.TestCase):
 
     def test_cityscapes_protocol_has_no_excluded_classes(self):
         protocol = run_input(data_type="cityscapes").to_protocol(
-            semantic_id_to_evaluation_id=consistency.CITYSCAPES_19_EVAL_CATEGORIES,
+            semantic_id_to_evaluation_id=constants.CITYSCAPES_19_EVAL_CATEGORIES,
             evaluation_class_id_to_label={"2": "person"},
-            valid_part_ids=range(1, consistency.MAX_PARTS_CITY + 1),
-            observation_columns=[f"part_{part_id}" for part_id in range(consistency.MAX_PARTS_CITY + 1)],
+            valid_part_ids=range(1, constants.MAX_PARTS_CITY + 1),
+            observation_columns=[f"part_{part_id}" for part_id in range(constants.MAX_PARTS_CITY + 1)],
             excluded_evaluation_class_ids=[],
         )
         self.assertEqual(
             protocol["parts"]["valid_part_ids"],
-            list(range(1, consistency.MAX_PARTS_CITY + 1)),
+            list(range(1, constants.MAX_PARTS_CITY + 1)),
         )
         self.assertEqual(protocol["classes"]["background_evaluation_class_id"], None)
         self.assertEqual(protocol["classes"]["excluded_evaluation_class_ids"], [])
@@ -219,16 +221,19 @@ class ConsistencyPartsTests(unittest.TestCase):
             dataset.img_ids = ["sample"]
             dataset.annotations_dir = str(semantic_dir)
             dataset.get_img_path.return_value = str(image_path)
-            dataset.convert_targets = np.vectorize(consistency.CITYSCAPES_19_EVAL_CATEGORIES.get)
+            dataset.convert_targets = np.vectorize(constants.CITYSCAPES_19_EVAL_CATEGORIES.get)
             observation = [np.nan, 0, 0, 0, 1, np.nan, 0, "person", "sample"]
             with (
-                patch.dict(os.environ, {
-                    "RESULTS_DIR": str(root),
-                    "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
-                }),
-                patch.object(consistency, "load_model_checkpoint"),
-                patch.object(consistency, "PatchClassificationDataset", return_value=dataset),
-                patch.object(consistency, "part_intersect", return_value=({}, [observation])) as intersect,
+                patch.dict(
+                    os.environ,
+                    {
+                        "RESULTS_DIR": str(root),
+                        "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
+                    },
+                ),
+                patch.object(pipeline, "load_model_checkpoint"),
+                patch.object(pipeline, "PatchClassificationDataset", return_value=dataset),
+                patch.object(pipeline, "part_intersect", return_value=({}, [observation])) as intersect,
             ):
                 # The default mode must work even without an SIDS cache.
                 consistency.run_consistency(run_input(data_type="cityscapes"))
@@ -238,14 +243,10 @@ class ConsistencyPartsTests(unittest.TestCase):
                 unfiltered_score = unfiltered["scores"]["consistency"]["value"]
 
                 with self.assertRaises(FileNotFoundError):
-                    consistency.run_consistency(
-                        run_input(data_type="cityscapes", official_parts_only=True)
-                    )
+                    consistency.run_consistency(run_input(data_type="cityscapes", official_parts_only=True))
 
                 np.save(native_dir / "sample.npy", [[24, 24, 25, 26, 31]])
-                consistency.run_consistency(
-                    run_input(data_type="cityscapes", official_parts_only=True)
-                )
+                consistency.run_consistency(run_input(data_type="cityscapes", official_parts_only=True))
                 np.testing.assert_array_equal(intersect.call_args.args[2], [[4, -1, -1, 5, -1]])
                 filtered_bundle, filtered = latest_record(catalog_root)
                 self.assertEqual(filtered["status"], "complete")
@@ -255,7 +256,7 @@ class ConsistencyPartsTests(unittest.TestCase):
                 self.assertEqual(part_path.read_bytes(), original_bytes)
 
     def test_official_flag_rejects_pascal_before_loading_model(self):
-        with patch.object(consistency, "load_model_checkpoint") as load_model:
+        with patch.object(pipeline, "load_model_checkpoint") as load_model:
             with self.assertRaisesRegex(ValueError, "only for cityscapes"):
                 consistency.run_consistency(run_input(official_parts_only=True))
             load_model.assert_not_called()
@@ -282,18 +283,21 @@ class ConsistencyPartsTests(unittest.TestCase):
             dataset.img_ids = ["sample"]
             dataset.annotations_dir = str(semantic_dir)
             dataset.get_img_path.return_value = str(image_path)
-            dataset.convert_targets = np.vectorize(consistency.PASCAL_ID_MAPPING.get)
-            observation = [np.nan] * (consistency.MAX_PARTS_PASCAL + 1)
+            dataset.convert_targets = np.vectorize(constants.PASCAL_ID_MAPPING.get)
+            observation = [np.nan] * (constants.MAX_PARTS_PASCAL + 1)
             observation[3] = 1
             observation += [0, "person", "sample"]
             with (
-                patch.dict(os.environ, {
-                    "RESULTS_DIR": str(root),
-                    "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
-                }),
-                patch.object(consistency, "load_model_checkpoint"),
-                patch.object(consistency, "PatchClassificationDataset", return_value=dataset),
-                patch.object(consistency, "part_intersect", return_value=({}, [observation])) as intersect,
+                patch.dict(
+                    os.environ,
+                    {
+                        "RESULTS_DIR": str(root),
+                        "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
+                    },
+                ),
+                patch.object(pipeline, "load_model_checkpoint"),
+                patch.object(pipeline, "PatchClassificationDataset", return_value=dataset),
+                patch.object(pipeline, "part_intersect", return_value=({}, [observation])) as intersect,
             ):
                 # Legacy mode needs no panoptic semantic cache.
                 consistency.run_consistency(run_input())
@@ -344,11 +348,9 @@ class ConsistencyPartsTests(unittest.TestCase):
                     consistency.run_consistency(run_input(require_semantic_match=True))
 
     def test_semantic_match_flag_rejects_cityscapes_before_loading_model(self):
-        with patch.object(consistency, "load_model_checkpoint") as load_model:
+        with patch.object(pipeline, "load_model_checkpoint") as load_model:
             with self.assertRaisesRegex(ValueError, "only for pascal"):
-                consistency.run_consistency(
-                    run_input(data_type="cityscapes", require_semantic_match=True)
-                )
+                consistency.run_consistency(run_input(data_type="cityscapes", require_semantic_match=True))
             load_model.assert_not_called()
 
     def test_background_centroid_can_create_a_false_part_hit(self):
@@ -365,13 +367,18 @@ class ConsistencyPartsTests(unittest.TestCase):
         model.forward_from_conv_features.return_value = (None, distances)
 
         with (
-            patch.object(consistency, "to_normalized_tensor", return_value=torch.zeros((3, 5, 5))),
+            patch.object(helpers, "to_normalized_tensor", return_value=torch.zeros((3, 5, 5))),
             patch.object(torch.Tensor, "cuda", lambda self: self),
-            patch.object(consistency, "MAX_PARTS", 24, create=True),
         ):
-            _, legacy = consistency.part_intersect(image, semantic, parts, model, {1: "aeroplane"}, "sample", 0.8)
-            _, foreground = consistency.part_intersect(
-                image, semantic, parts, model, {1: "aeroplane"}, "sample", 0.8,
+            _, legacy = part_intersect(image, semantic, parts, model, {1: "aeroplane"}, "sample", 0.8)
+            _, foreground = part_intersect(
+                image,
+                semantic,
+                parts,
+                model,
+                {1: "aeroplane"},
+                "sample",
+                0.8,
                 exclude_background_centroid=True,
             )
 
@@ -392,12 +399,17 @@ class ConsistencyPartsTests(unittest.TestCase):
         model.forward_from_conv_features.return_value = (None, distances)
 
         with (
-            patch.object(consistency, "to_normalized_tensor", return_value=torch.zeros((3, 5, 5))),
+            patch.object(helpers, "to_normalized_tensor", return_value=torch.zeros((3, 5, 5))),
             patch.object(torch.Tensor, "cuda", lambda self: self),
-            patch.object(consistency, "MAX_PARTS", 24, create=True),
         ):
-            _, rows = consistency.part_intersect(
-                image, semantic, parts, model, {1: "person"}, "sample", 0.8,
+            _, rows = part_intersect(
+                image,
+                semantic,
+                parts,
+                model,
+                {1: "person"},
+                "sample",
+                0.8,
                 exclude_background_centroid=True,
                 merge_left_right_parts=True,
             )
@@ -424,13 +436,16 @@ class ConsistencyPartsTests(unittest.TestCase):
             dataset.get_img_path.return_value = str(image_path)
             dataset.convert_targets.side_effect = lambda value: value
             with (
-                patch.dict(os.environ, {
-                    "RESULTS_DIR": str(root),
-                    "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
-                }),
-                patch.object(consistency, "load_model_checkpoint"),
-                patch.object(consistency, "PatchClassificationDataset", return_value=dataset),
-                patch.object(consistency, "part_intersect", return_value=({}, [])),
+                patch.dict(
+                    os.environ,
+                    {
+                        "RESULTS_DIR": str(root),
+                        "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
+                    },
+                ),
+                patch.object(pipeline, "load_model_checkpoint"),
+                patch.object(pipeline, "PatchClassificationDataset", return_value=dataset),
+                patch.object(pipeline, "part_intersect", return_value=({}, [])),
             ):
                 consistency.run_consistency(run_input())
 
@@ -460,12 +475,15 @@ class ConsistencyPartsTests(unittest.TestCase):
             dataset.annotations_dir = str(semantic_dir)
             dataset.get_img_path.return_value = str(root / "unused.png")
             with (
-                patch.dict(os.environ, {
-                    "RESULTS_DIR": str(root),
-                    "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
-                }),
-                patch.object(consistency, "load_model_checkpoint"),
-                patch.object(consistency, "PatchClassificationDataset", return_value=dataset),
+                patch.dict(
+                    os.environ,
+                    {
+                        "RESULTS_DIR": str(root),
+                        "MEASUREMENT_CATALOG_ROOT": str(catalog_root),
+                    },
+                ),
+                patch.object(pipeline, "load_model_checkpoint"),
+                patch.object(pipeline, "PatchClassificationDataset", return_value=dataset),
             ):
                 with self.assertRaises(ValueError):
                     consistency.run_consistency(run_input())
