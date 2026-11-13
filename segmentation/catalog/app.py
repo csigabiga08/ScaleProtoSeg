@@ -10,15 +10,16 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
+from urllib.parse import urlencode
 
 import pandas as pd
 import streamlit as st
 
+from segmentation.catalog import CatalogError
 from segmentation.catalog import jobs as jobs
 from segmentation.catalog import table as table
-from segmentation.catalog import CatalogError, load_observations
-from segmentation.catalog.cli import validate_measurement
 from segmentation.catalog.architectures import ARCHITECTURES
+from segmentation.catalog.measurement import render_measurement
 from segmentation.catalog.models import list_models, register_model
 
 st.set_page_config(page_title="Measurement catalog", layout="wide")
@@ -41,6 +42,16 @@ except CatalogError as error:
     st.stop()
 
 records, frame, errors = load(str(root), table.catalog_signature(root))
+measurement_id = st.query_params.get("measurement")
+if measurement_id:
+    if st.button("Back to catalog"):
+        del st.query_params["measurement"]
+        st.rerun()
+    if measurement_id not in records:
+        st.error("Measurement not found in this catalog.")
+    else:
+        render_measurement(root, records[measurement_id])
+    st.stop()
 st.title("Measurement catalog")
 st.caption(f"`{root}` · {len(frame)} measurements")
 with st.expander("Registered models", expanded=frame.empty):
@@ -129,42 +140,27 @@ with runs_tab:
         "created_at_utc",
         "measurement_id",
     ]
-    shown = view[[column for column in dict.fromkeys(columns) if column in view]]
+    shown = view[[column for column in dict.fromkeys(columns) if column in view]].copy()
+    shown.insert(0, "measurement_page", ["?" + urlencode({"measurement": pid}) for pid in shown.index])
     event = st.dataframe(
         shown,
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
         key="runs",
-        column_config={"score": st.column_config.NumberColumn(format="%.4f")},
+        column_config={
+            "score": st.column_config.NumberColumn(format="%.4f"),
+            "measurement_page": st.column_config.LinkColumn("Measurement", display_text="Open measurement"),
+        },
     )
     selected = list(shown.index[event.selection.rows])
     csv_download(shown, "measurements", "runs_csv")
 
     if len(selected) == 1:
         measurement_id = selected[0]
-        bundle = root / "measurements" / measurement_id
-        st.subheader(f"Measurement {measurement_id}")
-        left, right = st.columns(2)
-        with left:
-            st.json(records[measurement_id], expanded=1)
-        with right:
-            if st.button("Validate bundle (checks the observation hash)"):
-                st.write(validate_measurement(bundle))
-            if st.button("Load observations.csv"):
-                try:
-                    _, rows = load_observations(bundle, verify_hashes=False)
-                except CatalogError as error:
-                    st.error(str(error))
-                else:
-                    observations = pd.DataFrame(rows)
-                    st.caption(
-                        f"{len(observations)} rows · {observations['sample_id'].nunique()} samples · "
-                        f"{observations['prototype_id'].nunique()} prototypes"
-                    )
-                    st.dataframe(observations, hide_index=True, height=400)
+        st.link_button("Open selected measurement", "?" + urlencode({"measurement": measurement_id}))
     else:
-        st.caption("Select one row for details. The Compare tab uses all filtered runs.")
+        st.caption("Open a measurement link for details and analysis. The Compare tab uses all filtered runs.")
 
 with compare_tab:
     flags = table.boolean_columns(frame, fields)

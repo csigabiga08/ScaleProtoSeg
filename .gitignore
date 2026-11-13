@@ -118,6 +118,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv-catalog/
 env/
 venv/
 proto_env/

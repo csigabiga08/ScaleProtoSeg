@@ -360,8 +360,19 @@ population counts against the rows.
 
 A Streamlit app (evaluation profile) inspects, filters, compares and
 aggregates the catalog. Browsing the same `MEASUREMENT_CATALOG_ROOT` needs only
-read access; launching jobs also needs write access. Start it from the repository
-root and forward the port over SSH:
+read access; launching jobs also needs write access. The existing training `.venv`
+may use Python 3.9, which cannot install the Python 3.12 evaluation requirements.
+Create a separate Python 3.12 environment for the browser:
+
+```bash
+python3.12 -m venv .venv-catalog
+.venv-catalog/bin/python -m pip install -r requirements/requirements-catalog.txt
+```
+
+If Python 3.12 is not on `PATH`, use its full path. This lightweight environment
+is for the browser only; submitted measurements require a separate full evaluation
+environment (see `requirements/requirements-eval.txt`).
+Start the app from the repository root and forward the port over SSH:
 
 ```bash
 .venv/bin/python -m streamlit run segmentation/catalog/app.py \
@@ -370,8 +381,18 @@ root and forward the port over SSH:
 
 - **Runs**: one row per measurement; sidebar filters cover the inputs (model, stage,
   group checkpoint and every recorded `parameters.*` value), and *Extra fields* adds
-  any other varying `result.json` field. Select one row for its metadata, observations
-  and hash validation.
+  any other varying `result.json` field. Each row links to a measurement page with
+  metadata, observations, hash validation and prototype part-activation analysis.
+  The analysis averages each part over nonmissing observations (zeros count), then
+  computes Pearson correlations on jointly observed parts. Options retain only
+  consistent prototypes (any mean activation strictly above the threshold) and/or
+  part IDs from the prototype class's taxonomy. Consistency filtering precedes the
+  part filter. Stability measurements use clean `part_*` vectors.
+  CSV part IDs are class-local, so analysis uses `(class, part ID)` coordinates:
+  cross-class correlations, constant vectors and pairs with fewer than two shared
+  parts are undefined, not zero. Existing CSVs cannot recover the source class of
+  foreign part IDs included during measurement. The heatmap shows up to 200 chosen
+  prototypes; CSV downloads retain the full matrix, mean vectors and shared-part counts.
 - **Compare**: choose a boolean flag to find catalog entry pairs where every other
   input (including quantile) and selected extra field matches. The score has
   **Off**/**On** sub-columns containing lists of the original scores, preserving

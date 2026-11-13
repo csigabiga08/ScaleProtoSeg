@@ -1,0 +1,7 @@
+# Lightweight catalog browser; versions match the Python 3.12 evaluation profile.
+-e .
+
+pandas==3.0.5
+pydantic==2.13.5
+python-dotenv==1.2.3
+streamlit==1.67.0

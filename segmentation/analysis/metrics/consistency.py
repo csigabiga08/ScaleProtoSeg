@@ -6,6 +6,10 @@ import hydra
 import pandas as pd
 from omegaconf import DictConfig, OmegaConf
 
+from segmentation.analysis.metrics.part_activations import (
+    consistent_prototypes,
+    mean_part_activations,
+)
 from segmentation.analysis.metrics.pipeline import MetricPlugin, run_metric
 from segmentation.analysis.metrics.protocol import ConsistencyRunInput
 
@@ -51,14 +55,11 @@ class ConsistencyMetric(MetricPlugin):
         df_presence = pd.DataFrame(self.rows, columns=part_columns + ["proto_id", "class", "img_id"])
         if df_presence.empty:
             return float("nan"), 0, 0
-        df_mean = df_presence.groupby(["class", "proto_id"])[part_columns].mean().reset_index()
-        df_flag = df_mean.copy()
-        df_flag[part_columns] = df_flag[part_columns].apply(
-            lambda column: (column > run_input.threshold).astype(int), axis=1
+        df_mean = mean_part_activations(
+            df_presence.rename(columns={"class": "class_id", "proto_id": "prototype_id"}), part_columns
         )
-        df_flag["is_consistent"] = df_flag[part_columns].max(axis=1)
-        df_mean = df_mean.merge(df_flag[["proto_id", "is_consistent"]], on="proto_id")
-        return df_mean.is_consistent.mean(), float(df_mean.is_consistent.sum()), int(len(df_mean))
+        flags = consistent_prototypes(df_mean, run_input.threshold)
+        return flags.mean(), float(flags.sum()), int(len(flags))
 
 
 def run_consistency(run_input: ConsistencyRunInput):
