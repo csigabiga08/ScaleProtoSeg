@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import pandas as pd
+
 from segmentation.catalog import table as table
 
 
@@ -26,6 +28,53 @@ def record(measurement_id, metric="consistency", quantile=0.8, value=0.5, numera
 
 
 class CatalogTableTest(unittest.TestCase):
+    def test_field_groups_keep_full_paths_and_shorten_labels(self):
+        self.assertEqual(
+            table.field_groups(["metric", "model.label", "dataset.name", "model.training_stage", "model.label",
+                                "model.config.stage"]),
+            {
+                "": [("metric", "metric")],
+                "model": [
+                    ("model.label", "label"),
+                    ("model.training_stage", "training_stage"),
+                    ("model.config.stage", "config.stage"),
+                ],
+                "dataset": [("dataset.name", "name")],
+            },
+        )
+
+    def test_grouped_frame_keeps_sections_contiguous_without_changing_source(self):
+        frame = pd.DataFrame({
+            "score": [0.5], "model.label": ["fixture"], "dataset.name": ["pascal"],
+            "model.training_stage": ["push"], "numerator": [1],
+        }, index=["run"])
+        grouped = table.grouped_frame(frame)
+        self.assertEqual(list(grouped.columns), [
+            ("", "score"), ("model", "label"), ("model", "training_stage"),
+            ("dataset", "name"), ("", "numerator"),
+        ])
+        self.assertEqual(grouped.loc["run", ("model", "training_stage")], "push")
+        self.assertEqual(frame.columns[1], "model.label")
+        self.assertEqual(frame.columns[3], "model.training_stage")
+        self.assertEqual(table.grouped_frame(pd.DataFrame()).shape, (0, 0))
+
+    def test_grouped_frame_preserves_score_subcolumns_and_pivot_value_labels(self):
+        comparison = table.compare_flag(
+            table.records_frame([record("a", flag=False), record("b", flag=True)]),
+            "parameters.flag",
+            [],
+        )
+        grouped = table.grouped_frame(comparison)
+        self.assertIn(("model", "label"), grouped.columns)
+        self.assertEqual(grouped[("score", "Off")].tolist(), [[0.5]])
+        self.assertEqual(grouped[("score", "On")].tolist(), [[0.5]])
+        pivot = pd.DataFrame({
+            "model.label": ["fixture"], "0.8": [0.5], "mean over parameters.quantile": [0.5],
+        })
+        self.assertEqual(list(table.grouped_frame(pivot, fields=["model.label"]).columns), [
+            ("model", "label"), ("", "0.8"), ("", "mean over parameters.quantile"),
+        ])
+
     def test_frame_marks_missing_inputs_and_hides_lookup_tables(self):
         frame = table.records_frame([
             record("a", flag=True),

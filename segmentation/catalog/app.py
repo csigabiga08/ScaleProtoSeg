@@ -35,6 +35,15 @@ def csv_download(frame, name, key, label="Download CSV"):
     st.download_button(label, frame.to_csv(index=False), f"{name}.csv", "text/csv", key=key)
 
 
+def catalog_dataframe(frame, *, fields=None, column_config=None, **kwargs):
+    grouped = table.grouped_frame(frame, fields=fields)
+    config = {
+        grouped.index.nlevels + int(grouped.columns.get_loc(table.field_header(field))): value
+        for field, value in (column_config or {}).items()
+    }
+    return st.dataframe(grouped, column_config=config, **kwargs)
+
+
 try:
     root = table.read_catalog_root()
 except CatalogError as error:
@@ -56,7 +65,7 @@ st.title("Measurement catalog")
 st.caption(f"`{root}` · {len(frame)} measurements")
 with st.expander("Registered models", expanded=frame.empty):
     models = list_models(root)
-    st.dataframe(pd.json_normalize(models), hide_index=True)
+    catalog_dataframe(pd.json_normalize(models), hide_index=True)
     st.caption("Use a model's UUID or unique name in metric commands. Files are referenced, never copied.")
     architecture = st.selectbox("Architecture", sorted({name for name, _ in ARCHITECTURES}))
     st.json(ARCHITECTURES[(architecture, 1)].model_json_schema(), expanded=False)
@@ -89,7 +98,7 @@ with st.expander("Registered models", expanded=frame.empty):
                 st.rerun()
 if errors:
     with st.expander(f"{len(errors)} unreadable bundles skipped"):
-        st.dataframe(pd.DataFrame(errors, columns=["bundle", "error"]), hide_index=True)
+        catalog_dataframe(pd.DataFrame(errors, columns=["bundle", "error"]), hide_index=True)
 if frame.empty:
     st.info("The catalog has no readable measurements yet.")
     st.stop()
@@ -115,8 +124,14 @@ with st.sidebar:
     )
     st.subheader("Filters")
     selections = {"status": statuses}
-    for column in table.varying_columns(frame, inputs) + extras:
-        selections[column] = st.multiselect(column, sorted(frame[column].unique()))
+    for section, members in table.field_groups(table.varying_columns(frame, inputs) + extras).items():
+        if section:
+            with st.expander(section):
+                for column, label in members:
+                    selections[column] = st.multiselect(label, sorted(frame[column].unique()), key=f"filter_{column}")
+        else:
+            for column, label in members:
+                selections[column] = st.multiselect(label, sorted(frame[column].unique()), key=f"filter_{column}")
 
 view = table.filter_frame(frame, selections)
 fields = inputs + extras
@@ -141,16 +156,17 @@ with runs_tab:
         "measurement_id",
     ]
     shown = view[[column for column in dict.fromkeys(columns) if column in view]].copy()
-    shown.insert(0, "measurement_page", ["?" + urlencode({"measurement": pid}) for pid in shown.index])
-    event = st.dataframe(
-        shown,
+    linked = shown.copy()
+    linked["measurement_id"] = ["?" + urlencode({"measurement": pid}) for pid in shown["measurement_id"]]
+    event = catalog_dataframe(
+        linked,
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
         key="runs",
         column_config={
             "score": st.column_config.NumberColumn(format="%.4f"),
-            "measurement_page": st.column_config.LinkColumn("Measurement", display_text="Open measurement"),
+            "measurement_id": st.column_config.LinkColumn(display_text=r"\?measurement=(.*)", alignment="left"),
         },
     )
     selected = list(shown.index[event.selection.rows])
@@ -173,7 +189,7 @@ with compare_tab:
             "except the chosen flag is identical. Only configurations with both Off and On entries are shown."
         )
         comparison = table.compare_flag(view, flag, fields)
-        st.dataframe(comparison, hide_index=True)
+        catalog_dataframe(comparison, hide_index=True)
         if comparison.empty:
             st.info("No matching Off/On entries for this flag in the filtered runs.")
         st.caption(
@@ -188,7 +204,7 @@ with aggregate_tab:
     default = [column for column in varying if column != "parameters.quantile"]
     by = st.multiselect("Group by", fields, default=default)
     summary = table.aggregate(view, by)
-    st.dataframe(
+    catalog_dataframe(
         summary,
         hide_index=True,
         column_config={
@@ -206,7 +222,7 @@ with aggregate_tab:
         index=pivot_options.index("parameters.quantile") if "parameters.quantile" in pivot_options else 0,
     )
     pivot = table.pivot_means(view, by, pivot_column)
-    st.dataframe(pivot, hide_index=True)
+    catalog_dataframe(pivot, fields=fields, hide_index=True)
     st.caption(
         f"Cells are mean run scores; the last column averages the per-`{pivot_column}` means "
         "and is blank when a value is missing."
@@ -271,7 +287,7 @@ with coverage_tab:
                 "Cells list original scores and run statuses; null means an existing run has no score. "
                 "Not measured means no catalog entry exists."
             )
-            st.dataframe(coverage, hide_index=True)
+            catalog_dataframe(coverage, hide_index=True)
             csv_download(coverage, "coverage", "coverage_csv", "Download coverage CSV")
             csv_download(missing, "missing_measurements", "coverage_missing_csv", "Download missing configurations CSV")
             st.subheader("Run missing measurements")
@@ -281,7 +297,7 @@ with coverage_tab:
                 "Invalid configurations must be corrected before submission."
             )
             selection_key = hashlib.sha256(missing.to_json(orient="split").encode()).hexdigest()
-            missing_event = st.dataframe(
+            missing_event = catalog_dataframe(
                 missing,
                 hide_index=True,
                 on_select="rerun",

@@ -149,6 +149,38 @@ def varying_columns(frame, columns):
     return [column for column in columns if frame[column].nunique(dropna=False) > 1]
 
 
+def field_header(field):
+    """Split a metadata path into its section and section-local label."""
+    section, separator, label = field.partition(".")
+    return (section, label) if separator else ("", field)
+
+
+def field_groups(fields):
+    """Group fields by their top-level section, preserving encounter order."""
+    groups = {}
+    for field in dict.fromkeys(fields):
+        section, label = field_header(field)
+        groups.setdefault(section, []).append((field, label))
+    return groups
+
+
+def grouped_frame(frame, fields=None):
+    """Build display-only section headers, retaining existing score sub-columns.
+
+    Limit ``fields`` for pivots, whose value headers can themselves contain dots.
+    """
+    groups = {}
+    for index, column in enumerate(frame.columns):
+        section, field = column if isinstance(column, tuple) else ("", column)
+        header = field_header(field) if not section and (fields is None or field in fields) else (section, field)
+        section = header[0]
+        groups.setdefault(section or ("", index), []).append((index, header))
+    ordered = [item for group in groups.values() for item in group]
+    result = frame.iloc[:, [index for index, _ in ordered]].copy()
+    result.columns = pd.MultiIndex.from_tuples([header for _, header in ordered], names=[None, None])
+    return result
+
+
 def filter_frame(frame, selections):
     """Keep rows whose column value is in the selected values; empty selections keep all."""
     mask = pd.Series(True, index=frame.index)
