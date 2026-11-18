@@ -150,6 +150,7 @@ class MetricCatalogTests(unittest.TestCase):
             )
             record = load_measurement(bundle)
             self.assertEqual(record["status"], "complete")
+            self.assertNotIn("label", record["model"])
             self.assertEqual(
                 record["scores"]["consistency"],
                 {"value": 0.5, "unit": "fraction", "numerator": 1, "denominator": 2},

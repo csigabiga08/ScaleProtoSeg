@@ -42,7 +42,7 @@ def _quantile(record):
 
 def _checkpoint_terms(record):
     model = record.get("model", {})
-    parts = [model.get("label"), model.get("inputs", {})]
+    parts = [model.get("name"), model.get("inputs", {})]
     return " ".join(str(value) for value in parts if value is not None).lower()
 
 

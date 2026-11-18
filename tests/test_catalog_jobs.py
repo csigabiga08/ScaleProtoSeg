@@ -53,7 +53,7 @@ class CatalogJobsTest(unittest.TestCase):
             "status": "complete",
             "dataset": {"name": "cityscapes"},
             "model": {
-                "label": "model",
+                "name": "model",
                 "training_stage": "push",
                 "inputs": {
                     "prototype_checkpoint": {"path": str(self.checkpoint)},
@@ -106,7 +106,7 @@ class CatalogJobsTest(unittest.TestCase):
             {"parameters.official_parts_only": "yes"},
             {"execution.commit": "other"},
             {"parameters.seed": "1"},
-            {"model.label": table.MISSING},
+            {"model.name": table.MISSING},
         )
         for overrides in invalid:
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):

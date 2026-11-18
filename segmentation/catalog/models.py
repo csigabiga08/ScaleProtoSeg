@@ -80,7 +80,6 @@ def model_snapshot(registration):
     return {
         "registration_id": registration["model_id"],
         "name": registration["name"],
-        "label": registration["name"],
         "architecture": registration["architecture"],
         "schema_version": registration["schema_version"],
         "config": registration["config"],

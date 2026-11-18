@@ -15,7 +15,7 @@ MISSING = "∅"
 IDENTITY_INPUTS = (
     "metric",
     "dataset.name",
-    "model.label",
+    "model.name",
     "model.training_stage",
     "model.registration_id",
     "grouping_model.registration_id",

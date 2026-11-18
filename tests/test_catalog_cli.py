@@ -49,7 +49,7 @@ def make_record(measurement_id, *, quantile=0.8, status="complete", checkpoint="
         "metric": "consistency",
         "status": status,
         "scores": {},
-        "model": {"label": "fixture", "inputs": {"prototype_checkpoint": {"sha256": checkpoint}}},
+        "model": {"name": "fixture", "inputs": {"prototype_checkpoint": {"sha256": checkpoint}}},
         "dataset": {"name": "fixture-set", "split": "val"},
         "protocol": protocol,
         "parameters": {"quantile": quantile},

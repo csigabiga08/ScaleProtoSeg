@@ -42,7 +42,7 @@ class CatalogMeasurementTest(unittest.TestCase):
             "measurement_id": "fixture",
             "metric": "consistency",
             "status": "complete",
-            "model": {"label": "fixture", "inputs": {}},
+            "model": {"name": "fixture", "inputs": {}},
             "dataset": {"name": "pascal"},
             "parameters": {"quantile": 0.8},
             "protocol": {
@@ -123,7 +123,7 @@ class CatalogMeasurementTest(unittest.TestCase):
         self.write_record()
         second = copy.deepcopy(self.record)
         second["measurement_id"] = "second"
-        second["model"].update(label="other", training_stage="prune")
+        second["model"].update(name="other", training_stage="prune")
         second["parameters"]["flag"] = True
         bundle = self.bundle.parent / "second"
         bundle.mkdir()
@@ -135,11 +135,11 @@ class CatalogMeasurementTest(unittest.TestCase):
         self.assertIn("model", sections)
         self.assertEqual(
             [widget.label for widget in sections["model"].multiselect],
-            ["label", "training_stage"],
+            ["name", "training_stage"],
         )
         self.assertEqual([widget.label for widget in sections["parameters"].multiselect], ["flag"])
         runs = next(item for item in app.dataframe if item.key == "runs")
-        self.assertIn(("model", "label"), runs.value.columns)
+        self.assertIn(("model", "name"), runs.value.columns)
         self.assertIn(("model", "training_stage"), runs.value.columns)
         self.assertEqual(len(runs.value), 2)
         config = json.loads(runs.proto.columns)
@@ -152,15 +152,15 @@ class CatalogMeasurementTest(unittest.TestCase):
         app.multiselect(key="coverage_columns").set_value(["parameters.flag"]).run()
         self.assertFalse(app.exception)
         coverage = next(item.value for item in app.dataframe if ("score", "parameters.flag=false") in item.value)
-        self.assertIn(("model", "label"), coverage.columns)
+        self.assertIn(("model", "name"), coverage.columns)
         missing = next(item for item in app.dataframe if (item.key or "").startswith("coverage_missing_"))
         self.assertIn(("model", "training_stage"), missing.value.columns)
 
-        app.multiselect(key="filter_model.label").set_value(["fixture"]).run()
+        app.multiselect(key="filter_model.name").set_value(["fixture"]).run()
         self.assertFalse(app.exception)
         runs = next(item.value for item in app.dataframe if item.key == "runs")
         self.assertEqual(list(runs.index), ["fixture"])
-        self.assertEqual(app.multiselect(key="filter_model.label").value, ["fixture"])
+        self.assertEqual(app.multiselect(key="filter_model.name").value, ["fixture"])
 
     def test_unknown_and_running_measurements_and_bad_hash(self):
         app = self.detail("missing")

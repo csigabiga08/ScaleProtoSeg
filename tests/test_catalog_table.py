@@ -18,7 +18,7 @@ def record(measurement_id, metric="consistency", quantile=0.8, value=0.5, numera
         "measurement_id": measurement_id,
         "metric": metric,
         "status": "complete",
-        "model": {"label": "fixture", "inputs": {}},
+        "model": {"name": "fixture", "inputs": {}},
         "dataset": {"name": "pascal"},
         "parameters": {"quantile": quantile, **parameters},
         "protocol": {"classes": {"evaluation_class_id_to_label": {"1": "a"}}},
@@ -30,12 +30,12 @@ def record(measurement_id, metric="consistency", quantile=0.8, value=0.5, numera
 class CatalogTableTest(unittest.TestCase):
     def test_field_groups_keep_full_paths_and_shorten_labels(self):
         self.assertEqual(
-            table.field_groups(["metric", "model.label", "dataset.name", "model.training_stage", "model.label",
+            table.field_groups(["metric", "model.name", "dataset.name", "model.training_stage", "model.name",
                                 "model.config.stage"]),
             {
                 "": [("metric", "metric")],
                 "model": [
-                    ("model.label", "label"),
+                    ("model.name", "name"),
                     ("model.training_stage", "training_stage"),
                     ("model.config.stage", "config.stage"),
                 ],
@@ -45,16 +45,16 @@ class CatalogTableTest(unittest.TestCase):
 
     def test_grouped_frame_keeps_sections_contiguous_without_changing_source(self):
         frame = pd.DataFrame({
-            "score": [0.5], "model.label": ["fixture"], "dataset.name": ["pascal"],
+            "score": [0.5], "model.name": ["fixture"], "dataset.name": ["pascal"],
             "model.training_stage": ["push"], "numerator": [1],
         }, index=["run"])
         grouped = table.grouped_frame(frame)
         self.assertEqual(list(grouped.columns), [
-            ("", "score"), ("model", "label"), ("model", "training_stage"),
+            ("", "score"), ("model", "name"), ("model", "training_stage"),
             ("dataset", "name"), ("", "numerator"),
         ])
         self.assertEqual(grouped.loc["run", ("model", "training_stage")], "push")
-        self.assertEqual(frame.columns[1], "model.label")
+        self.assertEqual(frame.columns[1], "model.name")
         self.assertEqual(frame.columns[3], "model.training_stage")
         self.assertEqual(table.grouped_frame(pd.DataFrame()).shape, (0, 0))
 
@@ -65,14 +65,14 @@ class CatalogTableTest(unittest.TestCase):
             [],
         )
         grouped = table.grouped_frame(comparison)
-        self.assertIn(("model", "label"), grouped.columns)
+        self.assertIn(("model", "name"), grouped.columns)
         self.assertEqual(grouped[("score", "Off")].tolist(), [[0.5]])
         self.assertEqual(grouped[("score", "On")].tolist(), [[0.5]])
         pivot = pd.DataFrame({
-            "model.label": ["fixture"], "0.8": [0.5], "mean over parameters.quantile": [0.5],
+            "model.name": ["fixture"], "0.8": [0.5], "mean over parameters.quantile": [0.5],
         })
-        self.assertEqual(list(table.grouped_frame(pivot, fields=["model.label"]).columns), [
-            ("model", "label"), ("", "0.8"), ("", "mean over parameters.quantile"),
+        self.assertEqual(list(table.grouped_frame(pivot, fields=["model.name"]).columns), [
+            ("model", "name"), ("", "0.8"), ("", "mean over parameters.quantile"),
         ])
 
     def test_frame_marks_missing_inputs_and_hides_lookup_tables(self):
@@ -182,7 +182,7 @@ class CatalogTableTest(unittest.TestCase):
         duplicate["status"] = "failed"
         frame = table.records_frame([first, duplicate])
         values = {field: list(frame[field].unique()) for field in table.input_columns(frame)}
-        values["model.label"] += ["new_model"]
+        values["model.name"] += ["new_model"]
         values["dataset.name"] += ["new_dataset"]
         values["parameters.flag"] = ["false", "true"]
         values["parameters.quantile"] = ["0.8", "0.9"]
@@ -195,7 +195,7 @@ class CatalogTableTest(unittest.TestCase):
         scores = grid.iloc[0][("score", "parameters.flag=false | parameters.quantile=0.8")]
         self.assertEqual(json.loads(scores.split(" | ")[0]), [0.2, None])
         self.assertIn("complete, failed", scores)
-        new_rows = grid[grid[("", "model.label")] == "new_model"]
+        new_rows = grid[grid[("", "model.name")] == "new_model"]
         self.assertTrue((new_rows["score"] == table.NOT_MEASURED).all().all())
         self.assertNotIn("parameters.flag", grid.columns.get_level_values(1))
 
@@ -221,12 +221,12 @@ class CatalogTableTest(unittest.TestCase):
         frame = table.records_frame([record("a", flag=True)])
         values = {field: list(frame[field].unique()) for field in table.input_columns(frame)}
         with self.assertRaisesRegex(ValueError, "at least one candidate"):
-            table.coverage_matrix(frame, ["parameters.flag"], {**values, "model.label": []}, {})
+            table.coverage_matrix(frame, ["parameters.flag"], {**values, "model.name": []}, {})
         with self.assertRaisesRegex(ValueError, "Every input"):
             table.coverage_matrix(frame, ["parameters.flag"], {"parameters.flag": ["true"]}, {})
         with patch.object(table, "MAX_COVERAGE_CELLS", 1):
             with self.assertRaisesRegex(ValueError, "Fix more inputs"):
-                table.coverage_matrix(frame, ["parameters.flag"], {**values, "model.label": ["a", "b"]}, {})
+                table.coverage_matrix(frame, ["parameters.flag"], {**values, "model.name": ["a", "b"]}, {})
 
     def test_root_resolution_requires_only_read_access(self):
         with tempfile.TemporaryDirectory() as directory:

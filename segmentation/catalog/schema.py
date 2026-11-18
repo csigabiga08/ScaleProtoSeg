@@ -38,7 +38,6 @@ class ModelMetadata(Metadata):
     config: dict
     seed: Optional[int]
     tags: dict[str, str]
-    label: Text
     training_stage: Text
     dataset: Text
     architecture: Optional[Text]
