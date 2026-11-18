@@ -1,21 +1,23 @@
 """Atomic writer for UUID-addressed metric measurement bundles."""
 
 import csv
-from datetime import datetime, timezone
 import json
 import math
 import os
-from pathlib import Path
 import subprocess
 import sys
 import uuid
+import warnings
+from datetime import datetime, timezone
+from pathlib import Path
 
 from segmentation.catalog import (
-    CatalogError,
     OBSERVATION_KEY,
+    CatalogError,
     resolve_catalog_root,
     sha256_file,
 )
+from segmentation.catalog.models import find_model, model_snapshot
 from segmentation.catalog.schema import (
     Artifact,
     DatasetMetadata,
@@ -26,7 +28,6 @@ from segmentation.catalog.schema import (
     Population,
     Score,
 )
-from segmentation.catalog.models import find_model, model_snapshot
 
 
 def _file_identity(path):
@@ -299,6 +300,15 @@ class MetricOutput:
         self.result.completed_at_utc = _now()
         self._write_result()
         self._terminal = True
+        if self.metric == "consistency":
+            from segmentation.catalog.part_summary import write_part_summary
+
+            try:
+                write_part_summary(
+                    self.path, self.result.model_dump(mode="json", exclude_unset=True), self._observations
+                )
+            except CatalogError as error:
+                warnings.warn(f"Measurement completed, but part-summary generation failed: {error}", RuntimeWarning)
 
     def fail(self, error):
         self._ensure_running()

@@ -200,6 +200,9 @@ by `MEASUREMENT_CATALOG_ROOT`:
   measurements/<measurement-uuid>/
     result.json
     observations.csv
+    derived/                       # complete consistency measurements
+      part-summary-v1.csv
+      part-summary-v1.meta.json
 ```
 
 Set `MEASUREMENT_CATALOG_ROOT` in the job environment or in this checkout's ignored
@@ -216,14 +219,59 @@ profiles; filesystem integrity and scientific comparability are checked separate
 metric protocol and parameters (quantile, seed and the metric flags), selected
 prototype IDs, scores, the git commit and command, and the observations artifact
 (path, size, SHA-256). It is first published as `running`, then atomically replaced
-with a terminal `complete` or `failed` record. A bundle contains exactly the two
-files above. Observations use stable sample/class/prototype/repetition keys; blank
+with a terminal `complete` or `failed` record. The original evidence is the two
+top-level files; optional regenerable reports live under `derived/`.
+Observations use stable sample/class/prototype/repetition keys; blank
 consistency part values mean unavailable, while zero means an observed miss.
 Stability stores clean and noisy part vectors rather than derived equality flags.
 A sample is contributing if it appears in `observations.csv`; `population` only
 counts candidates, contributing samples and observations. There
 is no schema or protocol version: a changed metric definition must be added behind a
 new flag. Repeated configurations are separate measurements.
+
+Complete consistency runs automatically generate part-support counts from the
+observations already in memory. Summary failure warns without changing a
+successfully completed measurement. The CSV contains
+`class_id,prototype_id,part_id,observations,hits`, including zero-support
+coordinates for every observed prototype and declared part ID. A zero support
+has an undefined mean, not a zero mean. Counts require at most one row per
+sample/class/prototype; repetitions are rejected rather than counted as
+independent images. Stability's missing-as-zero vectors are not used for these
+support summaries.
+
+The JSON sidecar records the source observation identity, interpretation
+fingerprint, calculation/schema version, prototype population, declared analysis
+part IDs, generation time, and summary CSV hash. The CSV is published atomically
+before its metadata. Summaries never modify the original observations, scores,
+or `result.json`. They are verified against their own CSV and the advertised
+source/protocol identity when read; browsing does not rehash the original
+observations. Use `validate` to recheck original evidence.
+
+Backfill complete consistency measurements without inference (existing valid
+summaries are left unchanged; missing, stale or corrupt summaries are rebuilt):
+
+```bash
+.venv-catalog/bin/python -m segmentation.catalog.cli backfill-part-summaries
+.venv-catalog/bin/python -m segmentation.catalog.cli backfill-part-summaries --dataset pascal --quantile 0.8
+.venv-catalog/bin/python -m segmentation.catalog.cli backfill-part-summaries <measurement-id>
+```
+
+Backfilling needs catalog write access and verifies original observations when
+building a summary. Independent bundle errors are reported without stopping the
+remaining batch; any error gives a nonzero exit status.
+
+The webapp's **Show part-support diagnostics** option loads only these summaries
+for filtered rows and includes diagnostics in the measurement-table CSV export.
+Measurement pages show support curves, per-class and per-prototype evidence,
+counts and provenance. Threshold changes reuse counts; support curves reuse each
+prototype's maximum support among qualifying parts. A prototype qualifies when
+some recorded valid positive part has mean **strictly above** the recorded
+consistency threshold and at least the requested support. The denominator stays
+fixed at all observed prototypes, including those with no supported association;
+selected-but-unobserved prototypes are recorded separately and not silently added
+to that denominator. Diagnostics do not replace the recorded score. Missing
+summaries are shown as **Not calculated**, never zero, and browsing never writes
+derived files. Per-image overlap analyses still require the original rows.
 
 Both calculators accept these part and centroid options:
 

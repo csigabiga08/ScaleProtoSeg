@@ -6,11 +6,60 @@ import streamlit as st
 from segmentation.analysis.metrics.part_activations import prototype_part_correlation
 from segmentation.catalog import CatalogError, load_observations
 from segmentation.catalog.cli import validate_measurement
+from segmentation.catalog.part_summary import (
+    load_part_summary,
+    part_summary_signature,
+    summary_context_sha256,
+    support_curve,
+    support_statistics,
+)
 
 
 @st.cache_data(show_spinner="Reading and checking observations.csv...")
 def _observations(bundle, signature):
     return load_observations(bundle)
+
+
+@st.cache_data(show_spinner=False)
+def _part_summary(bundle, signature, context):
+    return load_part_summary(bundle)
+
+
+def cached_part_summary(bundle, record):
+    return _part_summary(str(bundle), part_summary_signature(bundle), summary_context_sha256(record))
+
+
+def support_table_row(bundle, record, minimum_support):
+    result = {
+        "derived.status": "Not applicable",
+        "derived.minimum_support": minimum_support,
+        "derived.threshold": None,
+        "derived.consistency": None,
+        "derived.rare_only": None,
+        "derived.evidence_coverage": None,
+        "derived.prototypes": None,
+    }
+    if record["metric"] != "consistency" or record["status"] != "complete":
+        return result
+    try:
+        summary = cached_part_summary(bundle, record)
+        if summary is None:
+            result["derived.status"] = "Not calculated"
+        else:
+            statistics = support_statistics(summary, minimum_support)
+            result.update(
+                {
+                    "derived.status": "Available",
+                    "derived.threshold": statistics["threshold"],
+                    "derived.consistency": statistics["value"],
+                    "derived.rare_only": statistics["rare_only"],
+                    "derived.evidence_coverage": statistics["evidence_coverage"],
+                    "derived.prototypes": statistics["denominator"],
+                }
+            )
+    except (CatalogError, OSError, ValueError) as error:
+        result["derived.status"] = f"Unavailable: {error}"
+    return result
 
 
 def _download(frame, name, measurement_id):
@@ -21,6 +70,68 @@ def _download(frame, name, measurement_id):
         "text/csv",
         key=f"measurement_{name}",
     )
+
+
+def render_support_report(bundle, record):
+    try:
+        summary = cached_part_summary(bundle, record)
+    except (CatalogError, OSError, ValueError) as error:
+        st.warning(f"Part-support report unavailable: {error}")
+        return
+    if summary is None:
+        st.caption(
+            "Part-support summary not calculated. Generate it with "
+            f"`python -m segmentation.catalog.cli backfill-part-summaries {record['measurement_id']}`."
+        )
+        return
+    st.subheader("Part-support diagnostics")
+    minimum = int(st.number_input("Minimum supporting images", min_value=1, value=10, step=1, key="support_minimum"))
+    try:
+        statistics = support_statistics(summary, minimum)
+        curve = pd.DataFrame(support_curve(summary))
+    except ValueError as error:
+        st.warning(str(error))
+        return
+    value = statistics["value"]
+    st.metric("Support-aware consistency", f"{value:.1%}" if value is not None else "Undefined")
+    st.caption(
+        f"{statistics['numerator']} / {statistics['denominator']} observed prototypes have a part with "
+        f"mean > {statistics['threshold']:g} and at least {minimum} supporting images. "
+        f"Rare-only qualifiers: {statistics['rare_only']}; prototypes without sufficient evidence: "
+        f"{statistics['insufficient_evidence']}. The denominator is fixed; recorded scores are unchanged. "
+        "Only recorded positive part IDs declared valid by the protocol are used."
+    )
+    st.line_chart(curve, x="minimum_support", y="value")
+    st.dataframe(curve, hide_index=True, key="support_curve")
+    _download(curve, "support_curve", record["measurement_id"])
+    with st.expander("Support evidence and provenance"):
+        prototypes = pd.DataFrame(
+            statistics["prototypes"],
+            columns=["class_id", "prototype_id", "maximum_support", "qualifying_support"],
+        )
+        prototypes["consistent"] = prototypes["qualifying_support"] >= minimum
+        prototypes["has_evidence"] = prototypes["maximum_support"] >= minimum
+        prototypes["rare_only"] = (prototypes["qualifying_support"] > 0) & ~prototypes["consistent"]
+        classes = prototypes.groupby("class_id").agg(
+            prototypes=("prototype_id", "size"),
+            consistent=("consistent", "sum"),
+            rare_only=("rare_only", "sum"),
+            with_evidence=("has_evidence", "sum"),
+        )
+        classes["consistency"] = classes["consistent"] / classes["prototypes"]
+        st.dataframe(classes, key="support_classes")
+        _download(classes, "support_classes", record["measurement_id"])
+        st.dataframe(prototypes, hide_index=True, key="support_prototypes")
+        _download(prototypes, "support_prototypes", record["measurement_id"])
+        counts = pd.DataFrame(
+            [row.model_dump() for row in summary.counts],
+            columns=["class_id", "prototype_id", "part_id", "observations", "hits"],
+        )
+        counts["mean"] = counts["hits"] / counts["observations"].replace(0, float("nan"))
+        counts["used_for_support"] = counts["part_id"].isin(summary.metadata.analysis_part_ids)
+        st.dataframe(counts, hide_index=True, key="support_counts")
+        _download(counts, "support_counts", record["measurement_id"])
+        st.json(summary.metadata.model_dump(mode="json"), expanded=False)
 
 
 def render_measurement(root, record):
@@ -47,6 +158,9 @@ def render_measurement(root, record):
                 st.write(validate_measurement(bundle))
             except CatalogError as error:
                 st.error(str(error))
+
+    if record["metric"] == "consistency" and record["status"] == "complete":
+        render_support_report(bundle, record)
 
     st.subheader("Prototype part-activation correlation")
     st.caption(

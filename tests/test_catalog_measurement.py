@@ -180,6 +180,58 @@ class CatalogMeasurementTest(unittest.TestCase):
         self.assertFalse(app.exception)
         self.assertIn("hash mismatch", app.error[0].value)
 
+    def test_support_summaries_in_details_and_runs_do_not_load_observations(self):
+        from segmentation.catalog.part_summary import backfill_part_summary
+
+        backfill_part_summary(self.bundle)
+        originals = {name: (self.bundle / name).read_bytes() for name in ("result.json", "observations.csv")}
+        with patch("segmentation.catalog.part_summary.load_observations", side_effect=AssertionError("not loaded")):
+            app = self.detail()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.metric[0].value, "0.0%")
+            curve = next(item.value for item in app.dataframe if "minimum_support" in item.value)
+            self.assertAlmostEqual(curve.iloc[0]["value"], 2 / 3)
+            self.assertEqual(curve.iloc[1]["value"], 0)
+            app.number_input(key="support_minimum").set_value(1).run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.metric[0].value, "66.7%")
+            counts = next(item.value for item in app.dataframe if "used_for_support" in item.value)
+            self.assertTrue(counts.loc[counts.observations == 0, "mean"].isna().all())
+            app.button[0].click().run()
+            app.checkbox(key="show_support_diagnostics").check().run()
+            self.assertFalse(app.exception)
+            runs = app.dataframe(key="runs").value
+            self.assertEqual(runs.loc["fixture", ("derived", "status")], "Available")
+            self.assertEqual(runs.loc["fixture", ("derived", "consistency")], 0)
+            app.number_input(key="runs_support_minimum").set_value(1).run()
+            self.assertFalse(app.exception)
+            self.assertAlmostEqual(app.dataframe(key="runs").value.loc["fixture", ("derived", "consistency")], 2 / 3)
+            self.assertEqual(app.dataframe(key="runs").value.loc["fixture", ("", "score")], 2 / 3)
+        for name, content in originals.items():
+            self.assertEqual((self.bundle / name).read_bytes(), content)
+
+    def test_missing_support_summary_is_not_a_zero_score(self):
+        app = AppTest.from_file(str(APP), default_timeout=20).run()
+        app.checkbox(key="show_support_diagnostics").check().run()
+        self.assertFalse(app.exception)
+        runs = app.dataframe(key="runs").value
+        self.assertEqual(runs.loc["fixture", ("derived", "status")], "Not calculated")
+        self.assertTrue(runs[("derived", "consistency")].isna().all())
+        self.assertFalse((self.bundle / "derived").exists())
+
+    def test_empty_support_report_is_undefined(self):
+        from segmentation.catalog.part_summary import backfill_part_summary
+
+        content = (self.bundle / "observations.csv").read_bytes().splitlines(keepends=True)[0]
+        (self.bundle / "observations.csv").write_bytes(content)
+        self.record["artifacts"]["observations"].update(bytes=len(content), sha256=hashlib.sha256(content).hexdigest())
+        self.record["scores"]["consistency"].update(value=None, numerator=0, denominator=0, reason="empty")
+        self.write_record()
+        backfill_part_summary(self.bundle)
+        app = self.detail()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.metric[0].value, "Undefined")
+
 
 if __name__ == "__main__":
     unittest.main()

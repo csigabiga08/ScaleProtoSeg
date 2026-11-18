@@ -4,12 +4,12 @@ import csv
 import hashlib
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import patch
 
 from segmentation.catalog import (
@@ -19,8 +19,9 @@ from segmentation.catalog import (
     load_observations,
     resolve_catalog_root,
 )
-from segmentation.catalog.output import MetricOutput
 from segmentation.catalog.models import register_model
+from segmentation.catalog.output import MetricOutput
+from segmentation.catalog.part_summary import load_part_summary
 from segmentation.catalog.schema import MeasurementOutput
 
 
@@ -143,7 +144,14 @@ class MetricCatalogTests(unittest.TestCase):
             output.finish(value=0.5, numerator=1, denominator=2)
 
             bundle = output.path
-            self.assertEqual({path.name for path in bundle.iterdir()}, {"result.json", "observations.csv"})
+            self.assertEqual({path.name for path in bundle.iterdir()}, {"result.json", "observations.csv", "derived"})
+            summary = load_part_summary(bundle)
+            self.assertEqual(summary.metadata.selected_prototype_ids, [12, 19])
+            self.assertEqual(len(summary.metadata.prototypes), 1)
+            self.assertEqual(
+                [(row.part_id, row.observations, row.hits) for row in summary.counts],
+                [(1, 1, 1), (2, 0, 0), (3, 1, 0)],
+            )
             self.assertEqual(
                 json.loads((bundle / "result.json").read_text()),
                 output.result.model_dump(mode="json", exclude_unset=True),
@@ -185,6 +193,18 @@ class MetricCatalogTests(unittest.TestCase):
             score = load_measurement(output.path)["scores"]["consistency"]
             self.assertIsNone(score["value"])
             self.assertEqual(score["reason"], "no eligible prototype observations")
+
+    def test_summary_failure_does_not_change_successful_measurement(self):
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = self.make_output()
+            with (
+                patch("segmentation.catalog.part_summary.write_part_summary", side_effect=CatalogError("disk error")),
+                self.assertWarnsRegex(RuntimeWarning, "Measurement completed"),
+            ):
+                output.finish(0.5, numerator=1, denominator=2)
+            record = load_measurement(output.path)
+            self.assertEqual(record["status"], "complete")
+            self.assertEqual(record["scores"]["consistency"]["value"], 0.5)
 
     def test_implicit_grouping_rejects_weights_not_matching_the_main_registration(self):
         other_checkpoint = Path(self.temporary.name) / "other.pth"

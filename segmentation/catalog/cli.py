@@ -1,9 +1,9 @@
-"""Metadata-only query and validation commands for the metric catalog."""
+"""Query, validate, and derive reports from the metric measurement catalog."""
 
 import argparse
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from segmentation.catalog import (
     CatalogError,
@@ -166,6 +166,12 @@ def _command_parser():
     validate = commands.add_parser("validate", help="Validate selected metadata and canonical artifacts.")
     validate.add_argument("measurement_ids", nargs="*")
     validate.add_argument("--all-status", action="store_true")
+    backfill = commands.add_parser(
+        "backfill-part-summaries", help="Create missing/stale image-support summaries for complete consistency runs."
+    )
+    backfill.add_argument("measurement_ids", nargs="*")
+    _filter_arguments(backfill)
+    backfill.set_defaults(metric="consistency")
     commands.add_parser("architectures", help="Print source-defined architecture JSON schemas.")
     commands.add_parser("list-models", help="List registered checkpoint metadata.")
     register = commands.add_parser("register-model", help="Register one checkpoint; reject duplicate names or hashes.")
@@ -214,7 +220,11 @@ def main(argv=None):
             return 0
         root = configured_catalog_root()
         if args.command in ("list-models", "register-model", "relocate-model"):
-            from segmentation.catalog.models import list_models, register_model, relocate_model
+            from segmentation.catalog.models import (
+                list_models,
+                register_model,
+                relocate_model,
+            )
 
             if args.command == "list-models":
                 result = list_models(root)
@@ -250,6 +260,26 @@ def main(argv=None):
             diagnostics = [validate_measurement(bundle) for bundle in selected]
             print(json.dumps(diagnostics, indent=2, ensure_ascii=False))
             return 0 if all(item["status"] == "valid" for item in diagnostics) else 1
+        if args.command == "backfill-part-summaries":
+            from segmentation.catalog.part_summary import backfill_part_summary
+
+            selected = (
+                [find_measurement(root, measurement_id) for measurement_id in args.measurement_ids]
+                if args.measurement_ids
+                else [
+                    find_measurement(root, record["measurement_id"]) for record in find_records(root, **_filters(args))
+                ]
+            )
+            diagnostics = []
+            for bundle, record in selected:
+                item = {"measurement_id": record["measurement_id"]}
+                try:
+                    item["status"] = backfill_part_summary(bundle)
+                except (CatalogError, OSError, ValueError) as error:
+                    item.update(status="error", error=str(error))
+                diagnostics.append(item)
+            print(json.dumps(diagnostics, indent=2, ensure_ascii=False))
+            return 1 if any(item["status"] == "error" for item in diagnostics) else 0
     except (CatalogError, OSError, ValueError) as error:
         parser.exit(2, f"{parser.prog}: error: {error}\n")
     return 2

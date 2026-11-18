@@ -19,7 +19,7 @@ from segmentation.catalog import CatalogError
 from segmentation.catalog import jobs as jobs
 from segmentation.catalog import table as table
 from segmentation.catalog.architectures import ARCHITECTURES
-from segmentation.catalog.measurement import render_measurement
+from segmentation.catalog.measurement import render_measurement, support_table_row
 from segmentation.catalog.models import list_models, register_model
 
 st.set_page_config(page_title="Measurement catalog", layout="wide")
@@ -156,6 +156,20 @@ with runs_tab:
         "measurement_id",
     ]
     shown = view[[column for column in dict.fromkeys(columns) if column in view]].copy()
+    if st.checkbox("Show part-support diagnostics", key="show_support_diagnostics"):
+        minimum = int(
+            st.number_input("Minimum supporting images", min_value=1, value=10, step=1, key="runs_support_minimum")
+        )
+        st.caption(
+            "Derived summaries only; observations are not loaded. Recorded scores stay unchanged. "
+            "Each row uses its recorded consistency threshold and a fixed observed-prototype denominator. "
+            "Generate missing/stale summaries with `python -m segmentation.catalog.cli backfill-part-summaries`."
+        )
+        diagnostics = pd.DataFrame(
+            [support_table_row(root / "measurements" / pid, records[pid], minimum) for pid in shown.index],
+            index=shown.index,
+        )
+        shown = shown.join(diagnostics)
     linked = shown.copy()
     linked["measurement_id"] = ["?" + urlencode({"measurement": pid}) for pid in shown["measurement_id"]]
     event = catalog_dataframe(
