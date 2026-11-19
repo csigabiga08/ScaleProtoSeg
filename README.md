@@ -191,6 +191,28 @@ python -m segmentation.eval_test  <your_training_run_name> <training_stage> <bat
 python -m segmentation.analysis.metrics.consistency <prototype_training_run_name> <training_stage> <data_type> --quantile <quantile> --threshold <threshold>
 ```
 
+### Imprecise activations
+
+For each prototype, this metric measures `outside_mean / inside_mean` for its
+assigned semantic class. It uses continuous log-similarity activations resized
+with nearest-neighbor interpolation to the validation labels. Each mean pools
+its corresponding pixels across the entire validation split. Void labels are
+excluded and Pascal VOC background is treated as a semantic class. Images where
+the assigned class is absent contribute only to the outside mean.
+
+Pass a ProtoSeg or ScaleProto checkpoint to evaluate all its prototypes:
+
+```bash
+sbatch scripts/run_metric.slurm imprecise_activations MODEL push pascal \
+  --checkpoint /path/to/checkpoints/push_last.pth
+```
+
+Use `cityscapes` for Cityscapes. The CSV in `metrics-imprecise-activations/`
+contains each prototype's class, inside and outside pixel counts, the two means,
+and their ratio. A missing region or zero inside mean yields `NaN` for the
+ratio. The run description reports the mean across prototypes with defined
+ratios. Use `--output-dir` to choose a different directory.
+
 ### Activation quantile scope
 
 Both consistency and stability accept `--quantile-scope class|image`:
