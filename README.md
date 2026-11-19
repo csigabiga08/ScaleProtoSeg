@@ -273,6 +273,24 @@ to that denominator. Diagnostics do not replace the recorded score. Missing
 summaries are shown as **Not calculated**, never zero, and browsing never writes
 derived files. Per-image overlap analyses still require the original rows.
 
+The fixed six-seed Pascal support-sensitivity study can be reproduced without
+inference in the training environment (including Matplotlib):
+
+```bash
+.venv/bin/python -m segmentation.analysis.support_sensitivity \
+  --output /path/to/new/pascal-support-sensitivity
+```
+
+This requires the complete 72-measurement consistency grid and its support
+summaries. It verifies source observations, reconstructs all recorded scores,
+and freezes the cohort and protocol evidence. Outputs include per-measurement
+and per-prototype evidence, quantile-specific results, quantile averages within
+each training seed, mean/sample SD across three seeds per architecture, and
+paired O/F/R/M contrasts on native, common-prototype and common-row populations.
+PDF/PNG curves accompany the tables. The output directory must not already
+exist; neither prior analyses nor measurements are overwritten. Historical
+scope assumptions and statistical limitations are recorded in the manifest.
+
 Both calculators accept these part and centroid options:
 
 | Desired configuration | Option | Folder label |
