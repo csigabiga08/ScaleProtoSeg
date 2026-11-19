@@ -68,6 +68,11 @@ class MetricOutput:
         tokens.extend((f"checkpoint_{_label(Path(checkpoint).stem)}", f"group_{group}"))
         self.file_suffix = "_".join(tokens)
         self.metric = metric
+        self.activation_plot_dir = (
+            self.path / f"activation_maps_{metric}_{self.file_suffix}"
+            if parameters.get("quantile_scope") == "image"
+            else None
+        )
         versions = {}
         for package in ("torch", "torchvision", "numpy", "pandas", "Pillow", "opencv-python"):
             try:
@@ -101,6 +106,8 @@ class MetricOutput:
             "packages": versions,
             "command": sys.argv,
         }
+        if self.activation_plot_dir is not None:
+            self.description["activation_plot_directory"] = str(self.activation_plot_dir)
         if part_groups is not None:
             self.description["left_right_part_groups"] = part_groups
         self._write()

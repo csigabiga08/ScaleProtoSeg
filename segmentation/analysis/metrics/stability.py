@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from find_nearest import to_normalized_tensor
 from segmentation.analysis.equivariance import quantile_map
+from segmentation.analysis.metrics.activation_plots import save_activation_plot
 from segmentation.analysis.metrics.output import MetricOutput
 from segmentation.checkpoints import load_model_checkpoint
 from segmentation.constants import (
@@ -74,7 +75,7 @@ def run_stability(
         data_type (str): Data type for testing: Cityscapes & Pascal.
         quantile (float, optional): Quantile to threshold the prototype activations. Defaults to 0.8.
         quantile_scope (str): "class" (default) restricts the quantile and active
-            area to the semantic class; "image" uses the whole image without masking.
+            area to the semantic class; "image" thresholds the whole image and saves activation plots.
         std_dev (float, optional): Standard deviation of the noise injected. Defaults to 0.2.
         group_name (str, optional): Name of the model when grouping is used. Defaults to None.
         output_dir (str, optional): Exact output directory, overriding the default
@@ -173,6 +174,8 @@ def run_stability(
     )
     output_path = str(output.path)
     log(f"Results directory: {output_path}")
+    if output.activation_plot_dir is not None:
+        log(f"Activation plots directory: {output.activation_plot_dir}")
 
     val_dataset = PatchClassificationDataset(  # TODO: Adapt to new dataset
         data_type=data_type,
@@ -226,12 +229,14 @@ def run_stability(
             exclude_background_centroid=exclude_background_centroid,
             merge_left_right_parts=merge_left_right_parts,
             quantile_scope=quantile_scope,
+            activation_plot_dir=output.activation_plot_dir,
         )
         _, noise_part_presence_list = part_intersect(
             img, cls_ann, part_ann, ppnet, cls2name, img_id, quantile, proto_ids, std_dev,
             exclude_background_centroid=exclude_background_centroid,
             merge_left_right_parts=merge_left_right_parts,
             quantile_scope=quantile_scope,
+            activation_plot_dir=output.activation_plot_dir,
         )
 
         tot_presence.extend(part_presence_list)
@@ -275,6 +280,7 @@ def part_intersect(
     exclude_background_centroid: bool = False,
     merge_left_right_parts: bool = False,
     quantile_scope: str = "class",
+    activation_plot_dir: Optional[Path] = None,
 ) -> Tuple[Dict[int, List[int]], List[List[Any]]]:
     """Compute intersection between part labels and prototype activations."""
 
@@ -334,17 +340,30 @@ def part_intersect(
                 upsampled_act_img_j = cv2.resize(
                     proto_act_img_j, dsize=(original_img_width, original_img_height), interpolation=cv2.INTER_NEAREST
                 )
-                upsampled_act_img_j = quantile_map(
+                binary_act_img_j = quantile_map(
                     torch.from_numpy(upsampled_act_img_j[None, :, :]),
                     quantile,
                     class_mask=torch.from_numpy(y_mask),
                     scope=quantile_scope,
                 ).numpy()
+                if quantile_scope == "image" and activation_plot_dir is not None:
+                    save_activation_plot(
+                        activation_plot_dir,
+                        img,
+                        img_id,
+                        cls2name[class_id - 1],
+                        p.item(),
+                        upsampled_act_img_j,
+                        binary_act_img_j[:, :, 0],
+                        quantile,
+                        class_mask=y_mask,
+                        noisy=noise is not None,
+                    )
 
                 for part_id, centroids in part_centroids.items():
                     for centroid in centroids:
                         x, y = centroid[0], centroid[1]
-                        presence_list[part_id] += upsampled_act_img_j[y, x, 0]
+                        presence_list[part_id] += binary_act_img_j[y, x, 0]
                 hits = [0 if val == 0 else 1 for val in presence_list]
                 if merge_left_right_parts:
                     # Keep the stability vector binary: redundant right-hand columns
