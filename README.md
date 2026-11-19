@@ -191,6 +191,17 @@ python -m segmentation.eval_test  <your_training_run_name> <training_stage> <bat
 
 ### Native consistency and stability measurements
 
+Imprecise activations measure activation outside each prototype's assigned
+semantic class. They use continuous log-similarity activations resized with
+nearest-neighbor interpolation to validation labels, excluding void labels and
+treating Pascal VOC background as a semantic class. Run the measurement through
+the shared metric catalog:
+
+```bash
+sbatch scripts/run_metric.slurm imprecise_activations \
+  model=REGISTERED_MODEL data_type=pascal
+```
+
 Every invocation allocates a fresh UUID directory under the catalog root configured
 by `MEASUREMENT_CATALOG_ROOT`:
 
