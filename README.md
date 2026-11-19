@@ -213,6 +213,14 @@ all result and description filenames; class-mode filenames retain their existing
 names. JSON descriptions record `parameters.quantile_scope`. Both modes use the
 same configuration folder unless `--output-dir` is supplied.
 
+Whole-image runs also save a PNG for each evaluated image/prototype pair under
+`activation_maps_<metric>_<run parameters>/<image ID>/` within the result folder.
+Each PNG shows the original image, the continuous log-similarity map resized to
+image size, and the exact binary mask used for scoring. Black is inactive and
+white is active. Both activation panels show the ground-truth semantic class
+contour in pink. Stability saves separate clean and noisy plots. The run
+description records the plot directory.
+
 ### Consistency and stability result folders
 
 Both calculators save into one of four folders in the evaluated checkpoint's model
