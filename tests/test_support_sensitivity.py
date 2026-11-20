@@ -6,15 +6,19 @@ from itertools import product
 from statistics import stdev
 
 from segmentation.analysis.support_sensitivity import (
+    CITYSCAPES_COHORT,
     COHORT,
     FLAGS,
+    IMPLICIT_CLASS_COMMITS,
     QUANTILES,
     SETTINGS,
+    STUDIES,
     aggregate,
+    canonical_variant,
     evidence_from_rows,
-    freeze_cohort,
     index_rows,
     paired_statistics,
+    select_cohort,
     statistics,
 )
 
@@ -57,13 +61,94 @@ def cohort_records():
     return records
 
 
+def cityscapes_record(name, q, revised):
+    architecture, model_id, grouping_id = CITYSCAPES_COHORT[name]
+    return {
+        "measurement_id": f"{name}-{q}-{revised}",
+        "model": {
+            "name": name,
+            "registration_id": model_id,
+            "architecture": architecture,
+            "inputs": {"prototype_checkpoint": {"sha256": model_id}},
+        },
+        "grouping_model": (
+            {"registration_id": grouping_id, "inputs": {"prototype_checkpoint": {"sha256": grouping_id}}}
+            if grouping_id
+            else None
+        ),
+        "dataset": {"name": "cityscapes", "split": "val", "candidate_count": 500},
+        "metric": "consistency",
+        "status": "complete",
+        "parameters": {
+            "quantile": q,
+            "threshold": 0.8,
+            "official_parts_only": revised,
+            "exclude_background_centroid": revised,
+        },
+        "protocol": {"quantile": q, "consistency": {"threshold": 0.8}, "parts": {}},
+        "execution": {"commit": next(iter(IMPLICIT_CLASS_COMMITS))},
+    }
+
+
+class CityscapesCohortTest(unittest.TestCase):
+    def test_selects_only_completed_class_scope_original_and_revised(self):
+        records = [cityscapes_record(*cell) for cell in product(CITYSCAPES_COHORT, QUANTILES, (False, True))]
+        expected = records[0]
+        image_pilot = copy.deepcopy(expected)
+        image_pilot["parameters"]["quantile_scope"] = "image"
+        filtered = copy.deepcopy(expected)
+        filtered["parameters"]["official_parts_only"] = True
+        unrelated = copy.deepcopy(expected)
+        unrelated["model"]["name"] = "cityscapes_no_kld_imnet_4_16"
+        running = {**expected, "status": "running"}
+        study = STUDIES["cityscapes"]
+        cells, missing = select_cohort(records[1:] + [image_pilot, filtered, unrelated, running], study)
+        self.assertEqual(len(cells), 35)
+        self.assertEqual(missing, [(expected["model"]["name"], 0.7, "O")])
+        self.assertEqual(len(select_cohort(records, study)[0]), 36)
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            select_cohort(records + [expected], study)
+
+    def test_validates_registration_grouping_and_scope(self):
+        expected = cityscapes_record("scaleproto_cityscapes", 0.7, False)
+        study = STUDIES["cityscapes"]
+        for change in (
+            lambda record: record["model"].update(registration_id="other"),
+            lambda record: record["grouping_model"].update(registration_id="other"),
+            lambda record: record["execution"].update(commit="unknown"),
+            lambda record: record["protocol"]["parts"].update(official_parts_only=True),
+        ):
+            modified = copy.deepcopy(expected)
+            change(modified)
+            with self.assertRaises(ValueError):
+                select_cohort([modified], study)
+        expected["execution"] = {}
+        expected["parameters"]["quantile_scope"] = "class"
+        self.assertEqual(len(select_cohort([expected], study)[0]), 1)
+
+    def test_matches_class_labels_not_local_numeric_ids(self):
+        def variant(class_id):
+            rows = [{"sample_id": "img", "class_id": class_id, "prototype_id": 1, "part_1": "1"}]
+            return evidence_from_rows(rows, [1]), index_rows(rows), [1]
+
+        canonical_ids = {"car": 0, "person": 1}
+        old = canonical_variant(variant(0), {"0": "car"}, canonical_ids)
+        revised = canonical_variant(variant(14), {"14": "car"}, canonical_ids)
+        other = canonical_variant(variant(0), {"0": "person"}, canonical_ids)
+        self.assertEqual(old, revised)
+        self.assertFalse(old[1].keys() & other[1].keys())
+
+
 class SupportSensitivityTest(unittest.TestCase):
     def test_cohort_rejects_missing_duplicate_and_incompatible_cells(self):
         records = cohort_records()
-        self.assertEqual(len(freeze_cohort(records)), 72)
-        for modified in (records[:-1], records + records[:1]):
-            with self.assertRaisesRegex(ValueError, "Incomplete|Duplicate"):
-                freeze_cohort(modified)
+        study = STUDIES["pascal"]
+        cells, missing = select_cohort(records, study)
+        self.assertEqual(len(cells), 72)
+        self.assertFalse(missing)
+        self.assertEqual(select_cohort(records[:-1], study)[1], [("scaleproto_pascal_seed_310792", 0.9, "M")])
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            select_cohort(records + records[:1], study)
         for change in (
             lambda record: record["parameters"].update(quantile_scope="image"),
             lambda record: record["protocol"]["parts"].update(merge_left_right_parts=True),
@@ -74,7 +159,7 @@ class SupportSensitivityTest(unittest.TestCase):
             modified = copy.deepcopy(records)
             change(modified[0])
             with self.assertRaises(ValueError):
-                freeze_cohort(modified)
+                select_cohort(modified, study)
 
     def test_matched_rows_recompute_support_without_dropping_unsupported_prototypes(self):
         rows = [

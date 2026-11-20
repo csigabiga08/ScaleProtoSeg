@@ -291,6 +291,26 @@ PDF/PNG curves accompany the tables. The output directory must not already
 exist; neither prior analyses nor measurements are overwritten. Historical
 scope assumptions and statistical limitations are recorded in the manifest.
 
+For the planned Cityscapes Original/Revised comparison, check readiness before
+running the analysis:
+
+```bash
+.venv-catalog/bin/python -m segmentation.analysis.support_sensitivity --dataset cityscapes --check-cohort
+.venv-catalog/bin/python -m segmentation.analysis.support_sensitivity --dataset cityscapes \
+  --output /path/to/new/cityscapes-support-sensitivity
+```
+
+The check lists missing completed cells and exits nonzero until all 36 are
+available. The cohort pins the three `4_16v2` ProtoSeg registrations and the
+three ScaleProtoSeg registrations with their grouping checkpoints. It excludes
+other configurations, the image-scope pilot, and intermediate annotation
+settings. Confirm the training-seed provenance before interpreting the sample
+SDs as seed variability. The Cityscapes run compares O directly with R,
+matches observations by semantic label across imported and native records,
+and produces tables without plots. The readiness check only reads metadata;
+the full run verifies the original observations and requires valid derived
+support summaries.
+
 Both calculators accept these part and centroid options:
 
 | Desired configuration | Option | Folder label |
