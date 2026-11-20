@@ -291,7 +291,7 @@ PDF/PNG curves accompany the tables. The output directory must not already
 exist; neither prior analyses nor measurements are overwritten. Historical
 scope assumptions and statistical limitations are recorded in the manifest.
 
-For the planned Cityscapes Original/Revised comparison, check readiness before
+For the Cityscapes Original/Revised comparison, check readiness before
 running the analysis:
 
 ```bash
@@ -310,6 +310,41 @@ matches observations by semantic label across imported and native records,
 and produces tables without plots. The readiness check only reads metadata;
 the full run verifies the original observations and requires valid derived
 support summaries.
+
+Profile-correlation versus positive-event overlap reuses the exact Revised
+measurements from either completed support study, without inference:
+
+```bash
+.venv-catalog/bin/python -m segmentation.analysis.event_overlap --dataset pascal \
+  --cohort-manifest /path/to/pascal-support-sensitivity/manifest.json \
+  --output /path/to/new/pascal-profile-event-overlap
+.venv-catalog/bin/python -m segmentation.analysis.event_overlap --dataset cityscapes \
+  --cohort-manifest /path/to/cityscapes-support-sensitivity/manifest.json \
+  --output /path/to/new/cityscapes-profile-event-overlap
+```
+
+The runner verifies frozen source identities and original observation hashes.
+It compares unordered within-class pairs on unrestricted parts (at least two
+jointly observed parts) and supported parts (at least five parts, each observed
+in at least ten common images). Profile Pearson and mean absolute difference
+use each prototype's own available-image means on the retained parts;
+positive-event Jaccard intersects observed image/part coordinates and never
+turns missing values into misses. Matched-image Pearson and availability overlap
+are also recorded. Cityscapes' five-part subset contains car/truck/bus, excluding
+four-part person/rider by design.
+
+Outputs are tables only: per-pair evidence, per-class and pooled measurement
+summaries, within-run quantile averages, mean/sample SD across three runs,
+quantile-specific summaries, and deterministically selected illustrative pairs.
+Primary results use all observed prototypes; both-consistent pairs are a
+secondary population. Rates include explicit eligibility/undefined counts.
+High Pearson means `rho >= 0.9`, low overlap `J < 0.5`, and high overlap
+`J >= 0.9`. Conditional rates are calculated before averaging; empty populations
+stay undefined, not zero, and incomplete quantile/run estimates are not silently
+averaged. Counts and quantiles are not independent training replicates, SDs are
+not confidence intervals, and no significance or prototype-deletion claim is
+made. The output directory must be new; prior results and measurements remain
+unchanged.
 
 Both calculators accept these part and centroid options:
 
