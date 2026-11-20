@@ -140,6 +140,15 @@ class CityscapesCohortTest(unittest.TestCase):
 
 
 class SupportSensitivityTest(unittest.TestCase):
+    def test_resumed_seed42_cannot_fill_matched_seed42_cell(self):
+        records = cohort_records()
+        selected = next(row for row in records if row["model"]["name"] == "pascalvoc_seed-42_run02")
+        resumed = copy.deepcopy(selected)
+        resumed["model"]["name"] = "pascalvoc_seed-42"
+        remaining = [row for row in records if row is not selected]
+        _, missing = select_cohort(remaining + [resumed], STUDIES["pascal"])
+        self.assertEqual(missing, [("pascalvoc_seed-42_run02", selected["parameters"]["quantile"], "O")])
+
     def test_cohort_rejects_missing_duplicate_and_incompatible_cells(self):
         records = cohort_records()
         study = STUDIES["pascal"]

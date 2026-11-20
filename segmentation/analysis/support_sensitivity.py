@@ -22,7 +22,7 @@ from segmentation.catalog.table import read_catalog_root
 
 COHORT = {
     "pascalvoc": "ProtoSeg",
-    "pascalvoc_seed-42": "ProtoSeg",
+    "pascalvoc_seed-42_run02": "ProtoSeg",
     "pascalvoc_seed-43": "ProtoSeg",
     "scaleproto_pascal": "ScaleProtoSeg",
     "scaleproto_pascal_seed_191095": "ScaleProtoSeg",
@@ -92,7 +92,7 @@ STUDIES = {
         {name: (architecture, None, None) for name, architecture in COHORT.items()},
         {(False, *flags): setting for flags, setting in SETTINGS.items()},
         TRANSITIONS,
-        "User confirmed only training random seed differs within architecture.",
+        "Matched seed family; ProtoSeg seed42 uses run02, not the resumed pascalvoc_seed-42 checkpoint.",
         "All records declare class scope. Where the original description and command omit scope, "
         "this agrees with the historical class-masked implementation (034e327) and later default "
         "quantile_scope='class' (c3837e3). Exact historical source revisions were not recorded.",

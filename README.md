@@ -273,8 +273,8 @@ to that denominator. Diagnostics do not replace the recorded score. Missing
 summaries are shown as **Not calculated**, never zero, and browsing never writes
 derived files. Per-image overlap analyses still require the original rows.
 
-The fixed six-seed Pascal support-sensitivity study can be reproduced without
-inference in the training environment (including Matplotlib):
+The fixed six-seed Pascal support-sensitivity study can be run without
+inference once the matched cohort is complete (including Matplotlib):
 
 ```bash
 .venv/bin/python -m segmentation.analysis.support_sensitivity \
@@ -290,6 +290,15 @@ paired O/F/R/M contrasts on native, common-prototype and common-row populations.
 PDF/PNG curves accompany the tables. The output directory must not already
 exist; neither prior analyses nor measurements are overwritten. Historical
 scope assumptions and statistical limitations are recorded in the manifest.
+
+The strict article cohort uses `pascalvoc_seed-42_run02`, whose training config
+matches the reference and seed43 runs, instead of the resumed
+`pascalvoc_seed-42` checkpoint used by the earlier Pascal exports. As of the
+2026-11-20 reconciliation, run02 C/S measurements are unavailable. The older
+Pascal ProtoSeg support/overlap aggregates and seed42 example are therefore
+not eligible for the three-seed article tables. They remain preserved as
+historical results. `--check-cohort` reports the missing cells; neither that
+check nor table reconciliation launches measurements.
 
 For the Cityscapes Original/Revised comparison, check readiness before
 running the analysis:
@@ -345,6 +354,30 @@ averaged. Counts and quantiles are not independent training replicates, SDs are
 not confidence intervals, and no significance or prototype-deletion claim is
 made. The output directory must be new; prior results and measurements remain
 unchanged.
+
+To reconcile the article's Original/Revised/Merged C/S reference tables and
+per-checkpoint imprecise-activation table from existing evidence:
+
+```bash
+.venv-catalog/bin/python -m segmentation.analysis.reference_tables \
+  --pascal-manifest /path/to/pascal-support-sensitivity/manifest.json \
+  --cityscapes-manifest /path/to/cityscapes-support-sensitivity/manifest.json \
+  --checkpoint-root /data/shared --output /path/to/new/article-reference-tables
+```
+
+The runner pins checkpoint/grouping identities from the frozen studies,
+excludes the resumed Pascal seed42 model, checks the matching ProtoSeg configs
+and distinct seeds, verifies original observations, and reconstructs C/S.
+It averages the three quantiles within seed before calculating the mean/sample
+SD across exactly three seeds. Missing measurements produce explicit empty
+cells and suppress the entire three-seed aggregate, not a two-seed replacement.
+Imprecise-activation ratios are independently reconstructed from recorded
+inside/outside means; their SD is across prototypes, not seeds. Outputs freeze
+sources and missing cells without modifying measurements or earlier studies.
+Historical activation descriptions record checkpoint paths, not their original
+hashes; the audit records current checkpoint identities without asserting a
+retrospective hash guarantee. ScaleProtoSeg uses the existing released seed
+family; its complete training configs are not included with those measurements.
 
 Both calculators accept these part and centroid options:
 
