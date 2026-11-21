@@ -19,7 +19,7 @@ class Artifact(Metadata):
 
 class Score(Metadata):
     value: Optional[FiniteFloat]
-    unit: Literal["fraction", "ratio"]
+    unit: Literal["fraction"]
     numerator: Any
     denominator: Any
     reason: Optional[Text] = None

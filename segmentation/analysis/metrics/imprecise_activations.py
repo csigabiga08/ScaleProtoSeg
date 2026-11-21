@@ -166,7 +166,6 @@ def run_imprecise_activations(run_input: ImpreciseActivationsRunInput):
             numerator=float(prototype_scores[defined].sum()) if defined.any() else 0,
             denominator=int(defined.sum()),
             reason="no prototypes with a defined imprecise activation score" if not defined.any() else None,
-            unit="fraction",
         )
         log(f"Mean imprecise activation score: {mean_score} ({defined.sum()}/{num_prototypes} prototypes)")
     except Exception as error:

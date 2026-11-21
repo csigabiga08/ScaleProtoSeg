@@ -293,7 +293,7 @@ class MetricOutput:
             observations=len(self._observations),
         )
 
-    def finish(self, value, *, numerator=None, denominator=None, reason=None, unit="fraction"):
+    def finish(self, value, *, numerator=None, denominator=None, reason=None):
         self._ensure_running()
         finite = value is not None and math.isfinite(float(value))
         value = float(value) if finite else None
@@ -306,7 +306,7 @@ class MetricOutput:
         self.result.scores = {
             self.metric: Score(
                 value=value,
-                unit=unit,
+                unit="fraction",
                 numerator=_json_value(numerator),
                 denominator=_json_value(denominator),
                 **({"reason": str(reason)} if reason else {}),
@@ -336,7 +336,7 @@ class MetricOutput:
         self.result.scores = {
             self.metric: Score(
                 value=None,
-                unit=self.result.protocol.get("score_unit", "fraction"),
+                unit="fraction",
                 numerator=None,
                 denominator=None,
                 reason="measurement failed before a final score was available",

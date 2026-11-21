@@ -190,7 +190,6 @@ class ImpreciseActivationsRunInput(MetricRunInput):
                 "aggregation": "mean_per_image_score",
                 "score": "outside_mean/(outside_mean+inside_mean)",
             },
-            "score_unit": "fraction",
             "observation_columns": [
                 "inside_activation_sum",
                 "inside_pixel_count",
