@@ -1,7 +1,7 @@
 """Measure activation outside each prototype's ground-truth semantic class."""
 
-from pathlib import Path
 import math
+from pathlib import Path
 
 import cv2
 import hydra
@@ -44,15 +44,25 @@ def _activation_sums(activations, class_counts, prototype_classes):
     return sums
 
 
-def _outside_inside_ratios(sums, counts):
-    means = np.divide(sums, counts, out=np.full_like(sums, np.nan), where=counts > 0)
+def _image_activation_scores(sums, counts):
+    means = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
     inside, outside = means.T
     return np.divide(
         outside,
-        inside,
+        inside + outside,
         out=np.full_like(inside, np.nan),
-        where=np.isfinite(inside) & np.isfinite(outside) & (inside != 0),
+        where=np.isfinite(inside) & np.isfinite(outside) & ((inside + outside) != 0),
     )
+
+
+def _mean_per_prototype(image_scores):
+    image_scores = np.asarray(image_scores, dtype=np.float64)
+    if image_scores.ndim != 2:
+        raise ValueError("Image scores must be a two-dimensional array")
+    defined = np.isfinite(image_scores)
+    counts = defined.sum(axis=0)
+    sums = np.where(defined, image_scores, 0).sum(axis=0)
+    return np.divide(sums, counts, out=np.full(sums.shape, np.nan), where=counts > 0)
 
 
 @torch.inference_mode()
@@ -88,9 +98,7 @@ def run_imprecise_activations(run_input: ImpreciseActivationsRunInput):
 
         dataset = PatchClassificationDataset(**context.dataset_options)
         output.record_dataset(dataset)
-        activation_sums = np.zeros((num_prototypes, 2), dtype=np.float64)
-        activation_counts = np.zeros((num_prototypes, 2), dtype=np.int64)
-        evaluated_images = 0
+        image_scores = []
 
         for image_id in tqdm(dataset.img_ids, desc="Computing imprecise activations"):
             labels = np.load(Path(dataset.annotations_dir) / f"{image_id}.npy")
@@ -128,8 +136,8 @@ def run_imprecise_activations(run_input: ImpreciseActivationsRunInput):
             image_counts = np.column_stack(
                 (image_class_counts[prototype_classes], valid_pixels - image_class_counts[prototype_classes])
             )
-            activation_sums += image_sums
-            activation_counts += image_counts
+            scores = _image_activation_scores(image_sums, image_counts)
+            image_scores.append(scores)
             for prototype_id, class_index in enumerate(prototype_classes):
                 output.add_observation(
                     sample_id=image_id,
@@ -140,20 +148,27 @@ def run_imprecise_activations(run_input: ImpreciseActivationsRunInput):
                     inside_pixel_count=image_counts[prototype_id, 0],
                     outside_activation_sum=image_sums[prototype_id, 1],
                     outside_pixel_count=image_counts[prototype_id, 1],
+                    imprecise_activation=(
+                        float(scores[prototype_id]) if np.isfinite(scores[prototype_id]) else None
+                    ),
                 )
-            evaluated_images += 1
 
-        ratios = _outside_inside_ratios(activation_sums, activation_counts)
-        defined = np.isfinite(ratios)
-        mean_ratio = float(ratios[defined].mean()) if defined.any() else float("nan")
-        output.finish(
-            mean_ratio,
-            numerator=float(ratios[defined].sum()) if defined.any() else 0,
-            denominator=int(defined.sum()),
-            reason="no prototypes with a defined outside/inside ratio" if not defined.any() else None,
-            unit="ratio",
+        image_score_matrix = (
+            np.asarray(image_scores, dtype=np.float64)
+            if image_scores
+            else np.empty((0, num_prototypes), dtype=np.float64)
         )
-        log(f"Mean imprecise activation ratio: {mean_ratio} ({defined.sum()}/{num_prototypes} prototypes)")
+        prototype_scores = _mean_per_prototype(image_score_matrix)
+        defined = np.isfinite(prototype_scores)
+        mean_score = float(prototype_scores[defined].mean()) if defined.any() else float("nan")
+        output.finish(
+            mean_score,
+            numerator=float(prototype_scores[defined].sum()) if defined.any() else 0,
+            denominator=int(defined.sum()),
+            reason="no prototypes with a defined imprecise activation score" if not defined.any() else None,
+            unit="fraction",
+        )
+        log(f"Mean imprecise activation score: {mean_score} ({defined.sum()}/{num_prototypes} prototypes)")
     except Exception as error:
         output.fail(error)
         raise

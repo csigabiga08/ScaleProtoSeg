@@ -197,12 +197,15 @@ measuring full-image semantic activation:
 
 #### Imprecise activations
 
-The initial metric implementation reports the pooled outside/inside mean
-activation ratio for each prototype's assigned semantic class, then averages
-defined prototype ratios. It uses continuous log-similarity activations resized
-with nearest-neighbor interpolation to validation labels, excludes void labels,
-and treats Pascal VOC background as a semantic class. Per-image activation sums
-and pixel counts are retained in the observations artifact. Run it with a
+For prototype \(p\) assigned to class \(C_p\), the inside and outside means are
+computed over valid pixels in each image. The image score is
+\(\mathrm{IA}_{i,p}=o_{i,p}/(o_{i,p}+i_{i,p})\), and the prototype score is the
+mean over images with a defined score. An empty region has mean zero; images
+where both means are zero are excluded. The final measurement score is the mean
+of defined prototype scores. Activations use continuous log-similarity maps
+resized with nearest-neighbor interpolation; void labels are excluded, and
+Pascal VOC background is a semantic class. Per-image activation sums, pixel
+counts, and scores are retained in the observations artifact. Run it with a
 registered model and dataset:
 
 ```bash

@@ -206,8 +206,11 @@ class MetricCatalogTests(unittest.TestCase):
                 protocol={
                     "metric": "imprecise_activations",
                     "score_unit": "ratio",
-                    "observation_columns": ["inside_activation_sum"],
-                    "observation_value_types": {"inside_activation_sum": "nonnegative"},
+                    "observation_columns": ["inside_activation_sum", "imprecise_activation"],
+                    "observation_value_types": {
+                        "inside_activation_sum": "nonnegative",
+                        "imprecise_activation": "fraction",
+                    },
                 },
             )
             output.add_observation(
@@ -216,6 +219,7 @@ class MetricCatalogTests(unittest.TestCase):
                 prototype_id=0,
                 repetition=0,
                 inside_activation_sum=1.5,
+                imprecise_activation=0.75,
             )
             with self.assertRaisesRegex(CatalogError, "finite nonnegative"):
                 output.add_observation(
@@ -224,12 +228,23 @@ class MetricCatalogTests(unittest.TestCase):
                     prototype_id=0,
                     repetition=0,
                     inside_activation_sum=-0.5,
+                    imprecise_activation=0.5,
+                )
+            with self.assertRaisesRegex(CatalogError, "finite fraction"):
+                output.add_observation(
+                    sample_id="out-of-range",
+                    class_id=1,
+                    prototype_id=0,
+                    repetition=0,
+                    inside_activation_sum=0.5,
+                    imprecise_activation=1.5,
                 )
             output.finish(value=1.5, numerator=1.5, denominator=1, unit="ratio")
 
             record, rows = load_observations(output.path)
             self.assertEqual(record["scores"]["imprecise_activations"]["unit"], "ratio")
             self.assertEqual(rows[0]["inside_activation_sum"], "1.5")
+            self.assertEqual(rows[0]["imprecise_activation"], "0.75")
 
     def test_summary_failure_does_not_change_successful_measurement(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):

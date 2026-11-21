@@ -5,7 +5,8 @@ import numpy as np
 from segmentation.analysis.metrics.imprecise_activations import (
     _activation_sums,
     _class_pixel_counts,
-    _outside_inside_ratios,
+    _image_activation_scores,
+    _mean_per_prototype,
 )
 
 
@@ -19,14 +20,20 @@ class ImpreciseActivationTests(unittest.TestCase):
         sums = _activation_sums(activations, counts, np.array([0, 1]))
         np.testing.assert_array_equal(sums, [[6, 16], [12, 3]])
 
-    def test_pooled_ratio_is_outside_mean_over_inside_mean(self):
-        sums = np.array([[6.0, 16.0], [12.0, 3.0]])
-        counts = np.array([[3, 4], [4, 3]])
-        np.testing.assert_allclose(_outside_inside_ratios(sums, counts), [2.0, 1 / 3])
+    def test_per_image_score_is_normalized_and_empty_regions_are_zero(self):
+        sums = np.array([[2.0, 2.0], [0.0, 8.0], [6.0, 0.0], [0.0, 0.0]])
+        counts = np.array([[2, 2], [0, 4], [3, 0], [2, 2]])
+        scores = _image_activation_scores(sums, counts)
+        np.testing.assert_allclose(scores[:3], [0.5, 1.0, 0.0])
+        self.assertTrue(np.isnan(scores[3]))
 
-    def test_zero_inside_mean_has_no_defined_ratio(self):
-        ratios = _outside_inside_ratios(np.array([[0.0, 4.0]]), np.array([[2, 2]]))
-        self.assertTrue(np.isnan(ratios[0]))
+    def test_prototype_score_is_mean_of_image_scores(self):
+        scores = _mean_per_prototype(np.array([[0.5], [0.1], [np.nan]]))
+        np.testing.assert_allclose(scores, [0.3])
+
+    def test_prototype_without_defined_image_scores_is_undefined(self):
+        scores = _mean_per_prototype(np.array([[np.nan], [np.nan]]))
+        self.assertTrue(np.isnan(scores[0]))
 
 
 if __name__ == "__main__":
