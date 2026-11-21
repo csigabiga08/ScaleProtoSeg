@@ -140,6 +140,7 @@ def select_cohort(records, study):
             continue
         params, protocol = record["parameters"], record["protocol"]
         q = params["quantile"]
+        is_legacy = record.get("legacy_metadata") is not None
         flags = tuple(params.get(field, False) for field in ANNOTATION_FLAGS)
         if not study.legacy_only and (q not in QUANTILES or flags not in study.settings):
             continue
@@ -157,7 +158,7 @@ def select_cohort(records, study):
             )
             if scope is not None
         }
-        if scopes == {"image"} and not study.legacy_only:
+        if scopes == {"image"}:
             continue
         if scopes != {"class"} and (scopes or record["execution"].get("commit") not in IMPLICIT_CLASS_COMMITS):
             raise ValueError(f"Unverified or conflicting quantile scope: {record['measurement_id']}")
@@ -176,7 +177,7 @@ def select_cohort(records, study):
             or protocol["quantile"] != q
             or protocol["consistency"]["threshold"] != THRESHOLD
             or (
-                study.legacy_only
+                (study.legacy_only and is_legacy)
                 and (params.get("quantile_scope") != "class" or "image_order_sha256" not in description)
             )
             or any(type(flag) is not bool for flag in flags)
@@ -186,7 +187,7 @@ def select_cohort(records, study):
             declarations = [
                 protocol["parts"].get(field),
                 protocol.get("prototype_selection", {}).get(field),
-                historical.get(field, False) if study.legacy_only else historical.get(field),
+                historical.get(field, False) if is_legacy else historical.get(field),
             ]
             if field == "exclude_background_centroid":
                 declarations.append(protocol.get("centroids", {}).get(field))
@@ -205,7 +206,7 @@ def select_cohort(records, study):
             )
         )
         datasets.add(json.dumps(dataset, sort_keys=True))
-        if study.legacy_only:
+        if is_legacy:
             class_maps.add(json.dumps(protocol["classes"], sort_keys=True))
         if description.get("image_order_sha256"):
             legacy_image_orders.add((description.get("validation_images"), description["image_order_sha256"]))

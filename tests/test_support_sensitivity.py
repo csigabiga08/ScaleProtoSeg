@@ -170,6 +170,17 @@ class SupportSensitivityTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 select_cohort(modified, study)
 
+    def test_native_class_scoped_run02_can_join_legacy_seed_cohort(self):
+        records = cohort_records()
+        for record in records:
+            if record["model"]["name"] != "pascalvoc_seed-42_run02":
+                continue
+            record.pop("legacy_metadata")
+            record["protocol"]["quantile_scope"] = "class"
+        cells, missing = select_cohort(records, STUDIES["pascal"])
+        self.assertEqual(len(cells), 72)
+        self.assertEqual(missing, [])
+
     def test_matched_rows_recompute_support_without_dropping_unsupported_prototypes(self):
         rows = [
             {"sample_id": "a", "class_id": 0, "prototype_id": 1, "part_1": "1", "part_2": "1"},

@@ -41,6 +41,7 @@ class MetricRunInputTests(unittest.TestCase):
             {
                 "metric": "consistency",
                 "quantile": 0.8,
+                "quantile_scope": "class",
                 "parts": {
                     "valid_part_ids": [9, 3],
                     "official_parts_only": False,
@@ -97,6 +98,7 @@ class MetricRunInputTests(unittest.TestCase):
         )
         self.assertEqual(protocol["metric"], "stability")
         self.assertEqual(protocol["quantile"], 0.8)
+        self.assertEqual(protocol["quantile_scope"], "class")
         self.assertEqual(protocol["parts"]["valid_part_ids"], [5, 2])
         self.assertFalse(protocol["parts"]["merge_left_right_parts"])
         self.assertEqual(protocol["classes"]["background_evaluation_class_id"], None)
@@ -209,7 +211,7 @@ class MetricRunInputTests(unittest.TestCase):
             self.assertNotIn(operational_value, serialized)
         self.assertEqual(
             set(protocol),
-            {"metric", "quantile", "parts", "classes", "consistency", "observation_columns"},
+            {"metric", "quantile", "quantile_scope", "parts", "classes", "consistency", "observation_columns"},
         )
 
 

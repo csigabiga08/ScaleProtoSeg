@@ -127,6 +127,7 @@ class ConsistencyRunInput(MetricRunInput):
         return {
             "metric": "consistency",
             "quantile": self.quantile,
+            "quantile_scope": "class",
             "parts": self._protocol_parts(valid_part_ids, left_right_part_groups),
             "classes": classes,
             "consistency": {
@@ -153,6 +154,7 @@ class StabilityRunInput(MetricRunInput):
         return {
             "metric": "stability",
             "quantile": self.quantile,
+            "quantile_scope": "class",
             "parts": self._protocol_parts(valid_part_ids, left_right_part_groups),
             "classes": self._protocol_classes(
                 semantic_id_to_evaluation_id,
