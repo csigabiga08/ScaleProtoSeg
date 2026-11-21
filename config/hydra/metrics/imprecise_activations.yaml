@@ -4,6 +4,7 @@ defaults:
   - _self_
 
 model: null
+grouping_model: null
 data_type: null
 
 hydra:

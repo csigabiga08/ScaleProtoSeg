@@ -97,6 +97,8 @@ class ImpreciseActivationsMetric(MetricPlugin):
             raise ValueError(f"Expected a nonempty prototype assignment matrix with {num_classes} classes")
         if not np.all(assignments.sum(axis=1) == 1):
             raise ValueError("Each prototype must be assigned to exactly one semantic class")
+        if not selected_ids:
+            return
         prototype_classes = assignments[selected_ids].argmax(axis=1)
         num_prototypes = len(selected_ids)
         device = self.model_device()
