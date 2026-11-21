@@ -120,6 +120,13 @@ class MetricOutput:
         self.observation_columns = list(protocol.get("observation_columns", ()))
         if not self.observation_columns:
             raise CatalogError("Metric protocol must declare observation_columns")
+        self.observation_value_types = protocol.get("observation_value_types", {})
+        if (
+            not isinstance(self.observation_value_types, dict)
+            or not set(self.observation_value_types).issubset(self.observation_columns)
+            or any(value not in ("finite", "nonnegative", "fraction") for value in self.observation_value_types.values())
+        ):
+            raise CatalogError("Observation value types must declare supported types for protocol columns")
         self.observation_table_columns = list(OBSERVATION_KEY) + self.observation_columns
         if len(set(self.observation_table_columns)) != len(self.observation_table_columns):
             raise CatalogError("Observation table column names must be unique")
@@ -236,7 +243,16 @@ class MetricOutput:
                 number = float(value)
             except (TypeError, ValueError) as error:
                 raise CatalogError(f"Observation {name} must be zero, one, or unavailable") from error
-            if math.isnan(number):
+            value_type = self.observation_value_types.get(name)
+            if value_type is not None:
+                if (
+                    not math.isfinite(number)
+                    or (value_type == "nonnegative" and number < 0)
+                    or (value_type == "fraction" and not 0 <= number <= 1)
+                ):
+                    raise CatalogError(f"Observation {name} must be a finite {value_type} value")
+                normalized[name] = str(number)
+            elif math.isnan(number):
                 normalized[name] = ""
             elif number in (0.0, 1.0):
                 normalized[name] = str(int(number))

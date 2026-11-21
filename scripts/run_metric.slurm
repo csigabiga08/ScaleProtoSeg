@@ -10,8 +10,8 @@
 set -euo pipefail
 metric=${1:-}
 case "$metric" in
-  consistency|stability) shift ;;
-  *) echo 'Usage: sbatch scripts/run_metric.slurm consistency|stability model=REGISTERED_MODEL data_type=DATASET [OVERRIDES]' >&2; exit 2 ;;
+  consistency|stability|imprecise_activations) shift ;;
+  *) echo 'Usage: sbatch scripts/run_metric.slurm consistency|stability|imprecise_activations model=REGISTERED_MODEL data_type=DATASET [OVERRIDES]' >&2; exit 2 ;;
 esac
 
 repo_root=${SCALEPROTOSEG_ROOT:-${SLURM_SUBMIT_DIR:-$PWD}}

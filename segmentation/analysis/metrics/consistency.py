@@ -10,7 +10,7 @@ from segmentation.analysis.metrics.part_activations import (
     consistent_prototypes,
     mean_part_activations,
 )
-from segmentation.analysis.metrics.pipeline import MetricPlugin, run_metric
+from segmentation.analysis.metrics.pipeline import PartMetricPlugin, run_metric
 from segmentation.analysis.metrics.protocol import ConsistencyRunInput
 
 
@@ -28,7 +28,7 @@ def _add_observations(output, rows, class_map, max_parts):
         output.add_observation(**observation)
 
 
-class ConsistencyMetric(MetricPlugin):
+class ConsistencyMetric(PartMetricPlugin):
     name = "consistency"
     missing_parts_nan = True
     empty_reason = "no eligible class/prototype observations"

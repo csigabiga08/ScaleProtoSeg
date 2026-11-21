@@ -61,7 +61,7 @@ class ConsistencyPartsTests(unittest.TestCase):
             dataset.img_ids = ["sample"]
             dataset.get_img_path.return_value = str(image_path)
             model = MagicMock()
-            model.cuda.return_value = model
+            model.to.return_value = model
             del model.group_projection
             model.epsilon = 1e-4
             model.prototype_class_identity = torch.zeros((2, 21))
@@ -143,6 +143,7 @@ class ConsistencyPartsTests(unittest.TestCase):
             {
                 "metric": "consistency",
                 "quantile": 0.7,
+                "quantile_scope": "class",
                 "parts": {
                     "valid_part_ids": list(range(1, max_parts + 1)),
                     "official_parts_only": False,

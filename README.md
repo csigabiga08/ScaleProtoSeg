@@ -191,6 +191,33 @@ python -m segmentation.eval_test  <your_training_run_name> <training_stage> <bat
 
 ### Native consistency and stability measurements
 
+Consistency and stability use the shared metric catalog and runner. Imprecise
+activations use the same registered-model inputs and catalog output while
+measuring full-image semantic activation:
+
+#### Imprecise activations
+
+For prototype \(p\) assigned to class \(C_p\), the inside and outside means are
+computed over valid pixels in each image. The image score is
+\(\mathrm{IA}_{i,p}=o_{i,p}/(o_{i,p}+i_{i,p})\), and the prototype score is the
+mean over images with a defined score. An empty region has mean zero; images
+where both means are zero are excluded. The final measurement score is the mean
+of defined prototype scores. Activations use continuous log-similarity maps
+resized with nearest-neighbor interpolation; void labels are excluded, and
+Pascal VOC background is a semantic class. Per-image activation sums, pixel
+counts, and scores are retained in the observations artifact. Run it with a
+registered model and dataset:
+
+```bash
+sbatch scripts/run_metric.slurm imprecise_activations \
+  model=REGISTERED_MODEL data_type=pascal
+```
+
+```bash
+sbatch scripts/run_metric.slurm imprecise_activations \
+  model=REGISTERED_MODEL data_type=pascal
+```
+
 Every invocation allocates a fresh UUID directory under the catalog root configured
 by `MEASUREMENT_CATALOG_ROOT`:
 
