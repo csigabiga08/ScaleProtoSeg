@@ -10,8 +10,12 @@ from unittest.mock import MagicMock, call, patch
 from pydantic import ValidationError
 import torch
 
-from segmentation.analysis.metrics import consistency, pipeline, stability
-from segmentation.analysis.metrics.protocol import ConsistencyRunInput, StabilityRunInput
+from segmentation.analysis.metrics import consistency, imprecise_activations, pipeline, stability
+from segmentation.analysis.metrics.protocol import (
+    ConsistencyRunInput,
+    ImpreciseActivationsRunInput,
+    StabilityRunInput,
+)
 from segmentation.catalog import CatalogError
 from segmentation.catalog.models import register_model
 
@@ -24,6 +28,7 @@ class ConsistencyCheckpointTests(unittest.TestCase):
     runners = (
         (ConsistencyRunInput, consistency.run_consistency),
         (StabilityRunInput, stability.run_stability),
+        (ImpreciseActivationsRunInput, imprecise_activations.run_imprecise_activations),
     )
 
     def setUp(self):
@@ -62,7 +67,7 @@ class ConsistencyCheckpointTests(unittest.TestCase):
             for group_reference in (None, "group", self.models[0]["model_id"]):
                 with self.subTest(metric=input_type.__name__, group=group_reference):
                     model, group = MagicMock(), MagicMock()
-                    model.cuda.return_value = model
+                    model.to.return_value = model
                     if group_reference is None:
                         del model.group_projection
                     with (
@@ -93,7 +98,7 @@ class ConsistencyCheckpointTests(unittest.TestCase):
                 with self.subTest(metric=input_type.__name__, grouped=grouped):
                     registration = self.models[int(grouped)]
                     model = MagicMock()
-                    model.cuda.return_value = model
+                    model.to.return_value = model
                     model.prototype_class_identity = torch.eye(2)
                     if not grouped:
                         del model.group_projection
@@ -134,11 +139,11 @@ class ConsistencyCheckpointTests(unittest.TestCase):
                         self.assertIsNone(record["grouping_model"])
                         self.assertNotIn("group_checkpoint", record["model"]["inputs"])
 
-    def test_grouping_projection_failures_are_recorded_for_both_metrics(self):
+    def test_grouping_projection_failures_are_recorded_for_all_metrics(self):
         for input_type, runner in self.runners:
             with self.subTest(metric=input_type.__name__):
                 model = MagicMock()
-                model.cuda.return_value = model
+                model.to.return_value = model
                 with (
                     patch.object(pipeline, "load_model_checkpoint", side_effect=[model, object()]),
                     patch.object(pipeline, "PatchClassificationDataset") as dataset,
@@ -147,7 +152,7 @@ class ConsistencyCheckpointTests(unittest.TestCase):
                         runner(input_type(model="main", grouping_model="group", data_type="cityscapes"))
                 dataset.assert_not_called()
         records = [json.loads(path.read_text()) for path in (self.root / "measurements").glob("*/result.json")]
-        self.assertEqual(len(records), 2)
+        self.assertEqual(len(records), 3)
         self.assertTrue(all(record["status"] == "failed" for record in records))
         self.assertTrue(all(record["failure"]["type"] == "ValueError" for record in records))
 

@@ -1,4 +1,4 @@
-"""Shared evaluation lifecycle with metric-specific observation and scoring hooks."""
+"""Shared metric lifecycle with metric-family-specific evaluation hooks."""
 
 from abc import ABC, abstractmethod
 
@@ -22,61 +22,65 @@ from settings import log
 
 class MetricPlugin(ABC):
     name: str
-    missing_parts_nan: bool
     empty_reason: str
-    part_prefixes = ("",)
-
-    def prepare(self, run_input):
-        """Initialize metric state and return the ordered noise levels per image."""
-        return (None,)
 
     def excluded_classes(self, context):
         return ()
 
-    def protocol_options(self, context):
-        return {}
-
     def implicit_grouping(self, run_input, model):
         return False
 
+    def model_device(self):
+        return "cuda"
+
     @abstractmethod
-    def observe(self, output, variants, context):
-        """Record one sample's ordered clean/noisy observation rows."""
+    def build_protocol(self, run_input, context):
+        """Return the metric-specific protocol for this dataset and run."""
+
+    @abstractmethod
+    def evaluate(self, run_input, context, model, dataset, output, prototype_ids, selected_ids):
+        """Record all observations for one run."""
 
     @abstractmethod
     def summarize(self, run_input, context):
         """Return the score, numerator and denominator for the whole run."""
 
 
-def run_metric(run_input: MetricRunInput, metric: MetricPlugin):
-    context = EvaluationContext.for_dataset(run_input.data_type)
-    excluded_classes = metric.excluded_classes(context)
-    observation_columns = [
-        f"{prefix}part_{part_id}" for prefix in metric.part_prefixes for part_id in range(context.max_parts + 1)
-    ]
-    protocol = run_input.to_protocol(
-        semantic_id_to_evaluation_id=context.semantic_ids,
-        evaluation_class_id_to_label={str(key + 1): value for key, value in context.class_labels.items()},
-        valid_part_ids=range(1, context.max_parts + 1),
-        observation_columns=observation_columns,
-        left_right_part_groups=left_right_part_groups() if run_input.merge_left_right_parts else None,
-        **metric.protocol_options(context),
-    )
-    output = MetricOutput(
-        metric.name,
-        run_input.resolved_checkpoint_path,
-        run_input.data_type,
-        model_name=run_input.model_name,
-        training_phase=run_input.training_phase,
-        protocol=protocol,
-        group_checkpoint=run_input.resolved_group_checkpoint_path,
-        model_ref=run_input.model,
-        grouping_model_ref=run_input.grouping_model,
-        **run_input.model_dump(exclude={"model", "grouping_model", "data_type"}),
-    )
-    try:
-        noise_levels = metric.prepare(run_input)
-        log(f"Loading model from {run_input.resolved_checkpoint_path}")
+class PartMetricPlugin(MetricPlugin):
+    """Evaluation loop shared by metrics based on semantic part annotations."""
+
+    missing_parts_nan: bool
+    part_prefixes = ("",)
+
+    def prepare(self, run_input):
+        """Initialize metric state and return the ordered noise levels per image."""
+        return (None,)
+
+    def protocol_options(self, context):
+        return {}
+
+    @abstractmethod
+    def observe(self, output, variants, context):
+        """Record one sample's ordered clean/noisy observation rows."""
+
+    def build_protocol(self, run_input, context):
+        observation_columns = [
+            f"{prefix}part_{part_id}"
+            for prefix in self.part_prefixes
+            for part_id in range(context.max_parts + 1)
+        ]
+        return run_input.to_protocol(
+            semantic_id_to_evaluation_id=context.semantic_ids,
+            evaluation_class_id_to_label={str(key + 1): value for key, value in context.class_labels.items()},
+            valid_part_ids=range(1, context.max_parts + 1),
+            observation_columns=observation_columns,
+            left_right_part_groups=left_right_part_groups() if run_input.merge_left_right_parts else None,
+            **self.protocol_options(context),
+        )
+
+    def evaluate(self, run_input, context, model, dataset, output, prototype_ids, selected_ids):
+        noise_levels = self.prepare(run_input)
+        excluded_classes = self.excluded_classes(context)
         log(
             f"Part labels: {'official Cityscapes parts only' if run_input.official_parts_only else 'all decoded part IDs'}"
         )
@@ -88,31 +92,9 @@ def run_metric(run_input: MetricRunInput, metric: MetricPlugin):
         log(
             f"Part centroids: {'foreground only' if run_input.exclude_background_centroid else 'including background (legacy)'}"
         )
-        model = load_model_checkpoint(run_input.resolved_checkpoint_path).cuda()
-        model.eval()
-        prototype_ids = None
-        if run_input.resolved_group_checkpoint_path is not None:
-            log(f"Loading prototype filter from {run_input.resolved_group_checkpoint_path}")
-            if run_input.resolved_group_checkpoint_path == run_input.resolved_checkpoint_path:
-                grouping_model = model
-                output.register_input("group_checkpoint", run_input.resolved_checkpoint_path)
-            else:
-                grouping_model = load_model_checkpoint(run_input.resolved_group_checkpoint_path)
-            if not hasattr(grouping_model, "group_projection"):
-                raise ValueError("The registered grouping model has no group projection")
-            grouping_model.eval()
-            prototype_ids = proto_filter(grouping_model)
-        elif metric.implicit_grouping(run_input, model):
-            output.register_input("group_checkpoint", run_input.resolved_checkpoint_path)
-            prototype_ids = proto_filter(model)
-        output.set_selected_prototype_ids(selected_prototypes(model, prototype_ids, excluded_classes))
-        output.update_model_metadata(runtime_class=type(model).__name__)
-
-        dataset = PatchClassificationDataset(**context.dataset_options)
-        output.record_dataset(dataset)
         for sample_index in tqdm(
             range(len(dataset)),
-            desc=f"Computing {metric.name.title()} Score Validation",
+            desc=f"Computing {self.name.title()} Score Validation",
             total=len(dataset),
         ):
             img_id = dataset.img_ids[sample_index]
@@ -135,14 +117,66 @@ def run_metric(run_input: MetricRunInput, metric: MetricPlugin):
                     prototype_ids,
                     excluded_classes,
                     max_parts=context.max_parts,
-                    missing_parts_nan=metric.missing_parts_nan,
+                    missing_parts_nan=self.missing_parts_nan,
                     noise=noise,
                     exclude_background_centroid=run_input.exclude_background_centroid,
                     merge_left_right_parts=run_input.merge_left_right_parts,
                 )
                 variants.append(rows)
-            metric.observe(output, variants, context)
+            self.observe(output, variants, context)
 
+
+def run_metric(run_input: MetricRunInput, metric: MetricPlugin):
+    """Share model registration, catalog output, and dataset lifecycle across metrics."""
+    context = EvaluationContext.for_dataset(run_input.data_type)
+    excluded_classes = metric.excluded_classes(context)
+    protocol = metric.build_protocol(run_input, context)
+    output = MetricOutput(
+        metric.name,
+        run_input.resolved_checkpoint_path,
+        run_input.data_type,
+        model_name=run_input.model_name,
+        training_phase=run_input.training_phase,
+        protocol=protocol,
+        group_checkpoint=run_input.resolved_group_checkpoint_path,
+        model_ref=run_input.model,
+        grouping_model_ref=run_input.grouping_model,
+        **run_input.model_dump(exclude={"model", "grouping_model", "data_type"}),
+    )
+    try:
+        log(f"Loading model from {run_input.resolved_checkpoint_path}")
+        model = load_model_checkpoint(run_input.resolved_checkpoint_path).to(metric.model_device())
+        model.eval()
+        prototype_ids = None
+        if run_input.resolved_group_checkpoint_path is not None:
+            log(f"Loading prototype filter from {run_input.resolved_group_checkpoint_path}")
+            if run_input.resolved_group_checkpoint_path == run_input.resolved_checkpoint_path:
+                grouping_model = model
+                output.register_input("group_checkpoint", run_input.resolved_checkpoint_path)
+            else:
+                grouping_model = load_model_checkpoint(run_input.resolved_group_checkpoint_path)
+            if not hasattr(grouping_model, "group_projection"):
+                raise ValueError("The registered grouping model has no group projection")
+            grouping_model.eval()
+            prototype_ids = proto_filter(grouping_model)
+        elif metric.implicit_grouping(run_input, model):
+            output.register_input("group_checkpoint", run_input.resolved_checkpoint_path)
+            prototype_ids = proto_filter(model)
+        selected_ids = selected_prototypes(model, prototype_ids, excluded_classes)
+        output.set_selected_prototype_ids(selected_ids)
+        output.update_model_metadata(runtime_class=type(model).__name__)
+
+        dataset = PatchClassificationDataset(**context.dataset_options)
+        output.record_dataset(dataset)
+        metric.evaluate(
+            run_input,
+            context,
+            model,
+            dataset,
+            output,
+            prototype_ids,
+            selected_ids,
+        )
         score, numerator, denominator = metric.summarize(run_input, context)
         log(f"{metric.name.title()} score: {score}")
         output.finish(

@@ -12,21 +12,6 @@ class MetricRunInput(BaseModel):
     model: str = Field(min_length=1)
     grouping_model: Optional[str] = None
     data_type: Literal["cityscapes", "pascal"]
-    quantile: float = Field(default=0.8, ge=0, le=1)
-    official_parts_only: bool = False
-    require_semantic_match: bool = False
-    exclude_background_centroid: bool = False
-    merge_left_right_parts: bool = False
-
-    @model_validator(mode="after")
-    def validate_dataset_flags(self):
-        if self.official_parts_only and self.data_type != "cityscapes":
-            raise ValueError("official_parts_only is supported only for cityscapes")
-        if self.require_semantic_match and self.data_type != "pascal":
-            raise ValueError("require_semantic_match is supported only for pascal")
-        if self.merge_left_right_parts and self.data_type != "pascal":
-            raise ValueError("merge_left_right_parts is supported only for pascal")
-        return self
 
     @cached_property
     def registration(self):
@@ -74,6 +59,35 @@ class MetricRunInput(BaseModel):
     def resolved_group_checkpoint_path(self) -> Optional[str]:
         return self.group_registration["checkpoint"]["path"] if self.group_registration else None
 
+    def _protocol_classes(
+        self,
+        semantic_id_to_evaluation_id: Mapping[int, int],
+        evaluation_class_id_to_label: Mapping[str, str],
+    ) -> Dict[str, object]:
+        return {
+            "semantic_id_to_evaluation_id": dict(semantic_id_to_evaluation_id),
+            "evaluation_class_id_to_label": dict(evaluation_class_id_to_label),
+            "background_evaluation_class_id": 1 if self.data_type == "pascal" else None,
+        }
+
+
+class PartMetricRunInput(MetricRunInput):
+    quantile: float = Field(default=0.8, ge=0, le=1)
+    official_parts_only: bool = False
+    require_semantic_match: bool = False
+    exclude_background_centroid: bool = False
+    merge_left_right_parts: bool = False
+
+    @model_validator(mode="after")
+    def validate_dataset_flags(self):
+        if self.official_parts_only and self.data_type != "cityscapes":
+            raise ValueError("official_parts_only is supported only for cityscapes")
+        if self.require_semantic_match and self.data_type != "pascal":
+            raise ValueError("require_semantic_match is supported only for pascal")
+        if self.merge_left_right_parts and self.data_type != "pascal":
+            raise ValueError("merge_left_right_parts is supported only for pascal")
+        return self
+
     def _protocol_parts(
         self,
         valid_part_ids: Sequence[int],
@@ -94,19 +108,8 @@ class MetricRunInput(BaseModel):
             }
         return parts
 
-    def _protocol_classes(
-        self,
-        semantic_id_to_evaluation_id: Mapping[int, int],
-        evaluation_class_id_to_label: Mapping[str, str],
-    ) -> Dict[str, object]:
-        return {
-            "semantic_id_to_evaluation_id": dict(semantic_id_to_evaluation_id),
-            "evaluation_class_id_to_label": dict(evaluation_class_id_to_label),
-            "background_evaluation_class_id": 1 if self.data_type == "pascal" else None,
-        }
 
-
-class ConsistencyRunInput(MetricRunInput):
+class ConsistencyRunInput(PartMetricRunInput):
     threshold: float = Field(default=0.8, ge=0, le=1)
 
     def to_protocol(
@@ -138,7 +141,7 @@ class ConsistencyRunInput(MetricRunInput):
         }
 
 
-class StabilityRunInput(MetricRunInput):
+class StabilityRunInput(PartMetricRunInput):
     std_dev: float = Field(default=0.2, ge=0)
     seed: int = 0
 
@@ -178,11 +181,10 @@ class ImpreciseActivationsRunInput(MetricRunInput):
     ) -> Dict[str, object]:
         return {
             "metric": "imprecise_activations",
-            "classes": {
-                "semantic_id_to_evaluation_id": dict(semantic_id_to_evaluation_id),
-                "evaluation_class_id_to_label": dict(evaluation_class_id_to_label),
-                "background_evaluation_class_id": 1 if self.data_type == "pascal" else None,
-            },
+            "classes": self._protocol_classes(
+                semantic_id_to_evaluation_id,
+                evaluation_class_id_to_label,
+            ),
             "activation": {
                 "method": "log_similarity",
                 "interpolation": "nearest",

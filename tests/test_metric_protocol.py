@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from segmentation.analysis.metrics.protocol import (
     ConsistencyRunInput,
+    ImpreciseActivationsRunInput,
     StabilityRunInput,
 )
 from segmentation.data.pascal_parts import left_right_part_groups
@@ -13,9 +14,22 @@ from segmentation.data.pascal_parts import left_right_part_groups
 
 class MetricRunInputTests(unittest.TestCase):
     def test_raw_checkpoint_arguments_are_rejected(self):
-        for input_type in (ConsistencyRunInput, StabilityRunInput):
+        for input_type in (ConsistencyRunInput, StabilityRunInput, ImpreciseActivationsRunInput):
             with self.assertRaises(ValidationError):
                 input_type(model="registered", data_type="pascal", checkpoint="/raw.pth")
+
+    def test_imprecise_activations_input_excludes_part_parameters(self):
+        run = ImpreciseActivationsRunInput(model="model", data_type="pascal")
+        self.assertFalse(hasattr(run, "quantile"))
+        with self.assertRaises(ValidationError):
+            ImpreciseActivationsRunInput(model="model", data_type="pascal", quantile=0.9)
+        protocol = run.to_protocol(
+            semantic_id_to_evaluation_id={0: 1},
+            evaluation_class_id_to_label={"1": "__background__"},
+        )
+        self.assertEqual(protocol["metric"], "imprecise_activations")
+        self.assertEqual(protocol["classes"]["background_evaluation_class_id"], 1)
+        self.assertNotIn("parts", protocol)
 
     def test_consistency_defaults_and_protocol_settings(self):
         run = ConsistencyRunInput(

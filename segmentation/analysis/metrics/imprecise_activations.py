@@ -13,11 +13,8 @@ from tqdm import tqdm
 
 from find_nearest import to_normalized_tensor
 from segmentation.analysis.metrics.helpers import EvaluationContext
+from segmentation.analysis.metrics.pipeline import MetricPlugin, run_metric
 from segmentation.analysis.metrics.protocol import ImpreciseActivationsRunInput
-from segmentation.catalog.output import MetricOutput
-from segmentation.checkpoints import load_model_checkpoint
-from segmentation.data.dataset import PatchClassificationDataset
-from settings import log
 
 
 def _class_pixel_counts(labels, activation_shape, num_classes):
@@ -65,40 +62,44 @@ def _mean_per_prototype(image_scores):
     return np.divide(sums, counts, out=np.full(sums.shape, np.nan), where=counts > 0)
 
 
-@torch.inference_mode()
-def run_imprecise_activations(run_input: ImpreciseActivationsRunInput):
-    context = EvaluationContext.for_dataset(run_input.data_type)
-    protocol = run_input.to_protocol(
-        semantic_id_to_evaluation_id=context.semantic_ids,
-        evaluation_class_id_to_label={str(key + 1): value for key, value in context.class_labels.items()},
-    )
-    output = MetricOutput(
-        "imprecise_activations",
-        run_input.resolved_checkpoint_path,
-        run_input.data_type,
-        model_name=run_input.model_name,
-        training_phase=run_input.training_phase,
-        protocol=protocol,
-        model_ref=run_input.model,
-    )
-    try:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        log(f"Loading model from {run_input.resolved_checkpoint_path} on {device}")
-        model = load_model_checkpoint(run_input.resolved_checkpoint_path).to(device).eval()
+class ImpreciseActivationsMetric(MetricPlugin):
+    name = "imprecise_activations"
+    empty_reason = "no prototypes with a defined imprecise activation score"
+
+    def __init__(self):
+        self.image_scores = []
+        self.selected_count = 0
+
+    def model_device(self):
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def build_protocol(self, run_input, context):
+        return run_input.to_protocol(
+            semantic_id_to_evaluation_id=context.semantic_ids,
+            evaluation_class_id_to_label={str(key + 1): value for key, value in context.class_labels.items()},
+        )
+
+    @torch.inference_mode()
+    def evaluate(
+        self,
+        run_input,
+        context,
+        model,
+        dataset,
+        output,
+        prototype_ids,
+        selected_ids,
+    ):
+        self.selected_count = len(selected_ids)
         assignments = model.prototype_class_identity.detach().cpu().numpy() != 0
         num_classes = len(context.class_labels)
         if assignments.ndim != 2 or assignments.shape[1] != num_classes or assignments.shape[0] == 0:
             raise ValueError(f"Expected a nonempty prototype assignment matrix with {num_classes} classes")
         if not np.all(assignments.sum(axis=1) == 1):
             raise ValueError("Each prototype must be assigned to exactly one semantic class")
-        prototype_classes = assignments.argmax(axis=1)
-        num_prototypes = len(prototype_classes)
-        output.set_selected_prototype_ids(range(num_prototypes))
-        output.update_model_metadata(runtime_class=type(model).__name__)
-
-        dataset = PatchClassificationDataset(**context.dataset_options)
-        output.record_dataset(dataset)
-        image_scores = []
+        prototype_classes = assignments[selected_ids].argmax(axis=1)
+        num_prototypes = len(selected_ids)
+        device = self.model_device()
 
         for image_id in tqdm(dataset.img_ids, desc="Computing imprecise activations"):
             labels = np.load(Path(dataset.annotations_dir) / f"{image_id}.npy")
@@ -114,21 +115,23 @@ def run_imprecise_activations(run_input: ImpreciseActivationsRunInput):
             if not np.any(labels):
                 continue
 
-            with Image.open(dataset.get_img_path(image_id)) as image:
+            with Image.open(dataset.get_img_path(image_id)) as source_image:
+                image = source_image.convert("RGB")
                 if labels.shape != (image.height, image.width):
                     raise ValueError(f"Image and semantic annotation sizes differ for {image_id}")
-                image_tensor = to_normalized_tensor(image.convert("RGB")).unsqueeze(0).to(device)
+                image_tensor = to_normalized_tensor(image).unsqueeze(0).to(device)
 
             distances = model.prototype_distances(image_tensor)[0]
             activations = torch.log((distances + 1) / (distances + model.epsilon)).cpu().numpy()
             if (
                 activations.ndim != 3
-                or activations.shape[0] != num_prototypes
+                or activations.shape[0] != assignments.shape[0]
                 or not np.isfinite(activations).all()
                 or np.any(activations < 0)
             ):
                 raise ValueError(f"Invalid prototype activation maps for {image_id}")
 
+            activations = activations[selected_ids]
             class_counts = _class_pixel_counts(labels, activations.shape[-2:], num_classes)
             image_sums = _activation_sums(activations, class_counts, prototype_classes)
             image_class_counts = class_counts.sum(axis=1)
@@ -137,40 +140,34 @@ def run_imprecise_activations(run_input: ImpreciseActivationsRunInput):
                 (image_class_counts[prototype_classes], valid_pixels - image_class_counts[prototype_classes])
             )
             scores = _image_activation_scores(image_sums, image_counts)
-            image_scores.append(scores)
-            for prototype_id, class_index in enumerate(prototype_classes):
+            self.image_scores.append(scores)
+            for output_index, (prototype_id, class_index) in enumerate(zip(selected_ids, prototype_classes)):
                 output.add_observation(
                     sample_id=image_id,
                     class_id=int(class_index) + 1,
                     prototype_id=prototype_id,
                     repetition=0,
-                    inside_activation_sum=image_sums[prototype_id, 0],
-                    inside_pixel_count=image_counts[prototype_id, 0],
-                    outside_activation_sum=image_sums[prototype_id, 1],
-                    outside_pixel_count=image_counts[prototype_id, 1],
-                    imprecise_activation=(
-                        float(scores[prototype_id]) if np.isfinite(scores[prototype_id]) else None
-                    ),
+                    inside_activation_sum=image_sums[output_index, 0],
+                    inside_pixel_count=image_counts[output_index, 0],
+                    outside_activation_sum=image_sums[output_index, 1],
+                    outside_pixel_count=image_counts[output_index, 1],
+                    imprecise_activation=float(scores[output_index]) if np.isfinite(scores[output_index]) else None,
                 )
 
+    def summarize(self, run_input, context):
         image_score_matrix = (
-            np.asarray(image_scores, dtype=np.float64)
-            if image_scores
-            else np.empty((0, num_prototypes), dtype=np.float64)
+            np.asarray(self.image_scores, dtype=np.float64)
+            if self.image_scores
+            else np.empty((0, self.selected_count), dtype=np.float64)
         )
         prototype_scores = _mean_per_prototype(image_score_matrix)
         defined = np.isfinite(prototype_scores)
         mean_score = float(prototype_scores[defined].mean()) if defined.any() else float("nan")
-        output.finish(
-            mean_score,
-            numerator=float(prototype_scores[defined].sum()) if defined.any() else 0,
-            denominator=int(defined.sum()),
-            reason="no prototypes with a defined imprecise activation score" if not defined.any() else None,
-        )
-        log(f"Mean imprecise activation score: {mean_score} ({defined.sum()}/{num_prototypes} prototypes)")
-    except Exception as error:
-        output.fail(error)
-        raise
+        return mean_score, float(prototype_scores[defined].sum()), int(defined.sum())
+
+
+def run_imprecise_activations(run_input: ImpreciseActivationsRunInput):
+    return run_metric(run_input, ImpreciseActivationsMetric())
 
 
 def _run_config(config: DictConfig):

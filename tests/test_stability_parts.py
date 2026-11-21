@@ -66,6 +66,7 @@ class StabilityPartsTests(unittest.TestCase):
             {
                 "metric": "stability",
                 "quantile": 0.7,
+                "quantile_scope": "class",
                 "parts": {
                     "valid_part_ids": [1, 2, 3],
                     "official_parts_only": False,

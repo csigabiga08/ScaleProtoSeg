@@ -7,7 +7,7 @@ import pandas as pd
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from segmentation.analysis.metrics.pipeline import MetricPlugin, run_metric
+from segmentation.analysis.metrics.pipeline import PartMetricPlugin, run_metric
 from segmentation.analysis.metrics.protocol import StabilityRunInput
 
 
@@ -38,7 +38,7 @@ def _add_observations(output, paired, class_map, max_parts):
         output.add_observation(**observation)
 
 
-class StabilityMetric(MetricPlugin):
+class StabilityMetric(PartMetricPlugin):
     name = "stability"
     missing_parts_nan = False
     part_prefixes = ("", "noisy_")
