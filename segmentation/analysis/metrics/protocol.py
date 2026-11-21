@@ -167,3 +167,40 @@ class StabilityRunInput(MetricRunInput):
             },
             "observation_columns": list(observation_columns),
         }
+
+
+class ImpreciseActivationsRunInput(MetricRunInput):
+    def to_protocol(
+        self,
+        *,
+        semantic_id_to_evaluation_id: Mapping[int, int],
+        evaluation_class_id_to_label: Mapping[str, str],
+    ) -> Dict[str, object]:
+        return {
+            "metric": "imprecise_activations",
+            "classes": {
+                "semantic_id_to_evaluation_id": dict(semantic_id_to_evaluation_id),
+                "evaluation_class_id_to_label": dict(evaluation_class_id_to_label),
+                "background_evaluation_class_id": 1 if self.data_type == "pascal" else None,
+            },
+            "activation": {
+                "method": "log_similarity",
+                "interpolation": "nearest",
+                "valid_label_id": "positive",
+                "aggregation": "pooled_valid_pixels",
+                "score": "outside_mean/inside_mean",
+            },
+            "score_unit": "ratio",
+            "observation_columns": [
+                "inside_activation_sum",
+                "inside_pixel_count",
+                "outside_activation_sum",
+                "outside_pixel_count",
+            ],
+            "observation_value_types": {
+                "inside_activation_sum": "nonnegative",
+                "inside_pixel_count": "nonnegative",
+                "outside_activation_sum": "nonnegative",
+                "outside_pixel_count": "nonnegative",
+            },
+        }

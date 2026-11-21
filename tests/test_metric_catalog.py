@@ -194,6 +194,43 @@ class MetricCatalogTests(unittest.TestCase):
             self.assertIsNone(score["value"])
             self.assertEqual(score["reason"], "no eligible prototype observations")
 
+    def test_numeric_observation_columns_and_ratio_scores(self):
+        with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
+            output = MetricOutput(
+                "imprecise_activations",
+                self.checkpoint,
+                "pascal",
+                model_name="fixture",
+                model_ref=self.registration["model_id"],
+                training_phase="push",
+                protocol={
+                    "metric": "imprecise_activations",
+                    "score_unit": "ratio",
+                    "observation_columns": ["inside_activation_sum"],
+                    "observation_value_types": {"inside_activation_sum": "nonnegative"},
+                },
+            )
+            output.add_observation(
+                sample_id="used",
+                class_id=1,
+                prototype_id=0,
+                repetition=0,
+                inside_activation_sum=1.5,
+            )
+            with self.assertRaisesRegex(CatalogError, "finite nonnegative"):
+                output.add_observation(
+                    sample_id="negative",
+                    class_id=1,
+                    prototype_id=0,
+                    repetition=0,
+                    inside_activation_sum=-0.5,
+                )
+            output.finish(value=1.5, numerator=1.5, denominator=1, unit="ratio")
+
+            record, rows = load_observations(output.path)
+            self.assertEqual(record["scores"]["imprecise_activations"]["unit"], "ratio")
+            self.assertEqual(rows[0]["inside_activation_sum"], "1.5")
+
     def test_summary_failure_does_not_change_successful_measurement(self):
         with patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)}):
             output = self.make_output()

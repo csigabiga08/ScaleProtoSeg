@@ -191,11 +191,24 @@ python -m segmentation.eval_test  <your_training_run_name> <training_stage> <bat
 
 ### Native consistency and stability measurements
 
-Imprecise activations measure activation outside each prototype's assigned
-semantic class. They use continuous log-similarity activations resized with
-nearest-neighbor interpolation to validation labels, excluding void labels and
-treating Pascal VOC background as a semantic class. Run the measurement through
-the shared metric catalog:
+Consistency and stability use the shared metric catalog and runner. Imprecise
+activations use the same registered-model inputs and catalog output while
+measuring full-image semantic activation:
+
+#### Imprecise activations
+
+The initial metric implementation reports the pooled outside/inside mean
+activation ratio for each prototype's assigned semantic class, then averages
+defined prototype ratios. It uses continuous log-similarity activations resized
+with nearest-neighbor interpolation to validation labels, excludes void labels,
+and treats Pascal VOC background as a semantic class. Per-image activation sums
+and pixel counts are retained in the observations artifact. Run it with a
+registered model and dataset:
+
+```bash
+sbatch scripts/run_metric.slurm imprecise_activations \
+  model=REGISTERED_MODEL data_type=pascal
+```
 
 ```bash
 sbatch scripts/run_metric.slurm imprecise_activations \
