@@ -44,6 +44,16 @@ class CatalogJobsTest(unittest.TestCase):
             config={"stage": "group", "grouped": True},
             checkpoint=self.group,
         )
+        self.pascal_checkpoint = self.root / "pascal.pth"
+        self.pascal_checkpoint.write_bytes(b"pascal prototype")
+        self.pascal_registration = register_model(
+            root=self.root,
+            name="pascal-model",
+            architecture="ScaleProtoSeg",
+            dataset="pascal",
+            config={"stage": "push", "grouped": False},
+            checkpoint=self.pascal_checkpoint,
+        )
         environment = patch.dict(os.environ, {"MEASUREMENT_CATALOG_ROOT": str(self.root)})
         environment.start()
         self.addCleanup(environment.stop)
@@ -123,6 +133,93 @@ class CatalogJobsTest(unittest.TestCase):
         self.assertIn("seed=7", arguments)
         with self.assertRaises(ValueError):
             jobs.measurement_arguments({**config, "parameters.threshold": "0.8"}, self.frame)
+
+    def test_imprecise_activations_is_planned_without_part_parameters(self):
+        config = {**self.configuration, "metric": "imprecise_activations"}
+        input_type = jobs.RUN_INPUTS["imprecise_activations"]
+        for field in config:
+            if field.startswith("parameters.") and field[len("parameters.") :] not in input_type.model_fields:
+                config[field] = table.MISSING
+
+        arguments = jobs.measurement_arguments(config, self.frame)
+        overrides = {key: json.loads(value) for key, value in (arg.split("=", 1) for arg in arguments[1:])}
+        self.assertEqual(arguments[0], "imprecise_activations")
+        self.assertEqual(overrides["model"], self.main_registration["model_id"])
+        self.assertEqual(overrides["grouping_model"], self.group_registration["model_id"])
+        self.assertEqual(overrides["data_type"], "cityscapes")
+        self.assertNotIn("quantile", overrides)
+        self.assertNotIn("official_parts_only", overrides)
+
+    def test_registration_drives_dataset_without_cross_dataset_combinations(self):
+        configurations, errors = jobs.plan_configurations(
+            "imprecise_activations",
+            [self.main_registration["model_id"], self.pascal_registration["model_id"]],
+            {},
+            {},
+            self.frame,
+            root=self.root,
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(configurations), 2)
+        datasets = {
+            config["model.registration_id"]: config["dataset.name"] for config in configurations
+        }
+        self.assertEqual(
+            datasets,
+            {
+                self.main_registration["model_id"]: "cityscapes",
+                self.pascal_registration["model_id"]: "pascal",
+            },
+        )
+
+    def test_metric_parameters_form_only_the_selected_product(self):
+        configurations, errors = jobs.plan_configurations(
+            "consistency",
+            [self.main_registration["model_id"]],
+            {},
+            {"quantile": ["0.7", "0.8"], "threshold": ["0.6", "0.9"]},
+            self.frame,
+            root=self.root,
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(configurations), 4)
+        self.assertEqual(
+            {
+                (config["parameters.quantile"], config["parameters.threshold"])
+                for config in configurations
+            },
+            {("0.7", "0.6"), ("0.7", "0.9"), ("0.8", "0.6"), ("0.8", "0.9")},
+        )
+
+    def test_grouping_registration_must_match_each_models_dataset(self):
+        with self.assertRaisesRegex(ValueError, "same dataset"):
+            jobs.plan_configurations(
+                "imprecise_activations",
+                [self.main_registration["model_id"]],
+                {"cityscapes": self.pascal_registration["model_id"]},
+                {},
+                self.frame,
+                root=self.root,
+            )
+
+    def test_empty_catalog_can_seed_a_plan_and_matching_is_exact(self):
+        empty = table.records_frame([])
+        configurations, errors = jobs.plan_configurations(
+            "imprecise_activations",
+            [self.main_registration["model_id"]],
+            {},
+            {},
+            empty,
+            root=self.root,
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(configurations), 1)
+        self.assertTrue(jobs.matching_measurements(empty, configurations[0]).empty)
+        exact = {field: self.frame.iloc[0][field] for field in table.input_columns(self.frame)}
+        measured = jobs.matching_measurements(self.frame, exact)
+        self.assertEqual(len(measured), 1)
+        changed = {**exact, "parameters.threshold": "0.7"}
+        self.assertTrue(jobs.matching_measurements(self.frame, changed).empty)
 
     def test_runtime_keeps_virtualenv_interpreter_path(self):
         binary = self.root / "base-python"

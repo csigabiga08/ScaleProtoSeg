@@ -8,35 +8,160 @@ import re
 import socket
 import subprocess
 from datetime import datetime, timezone
+from itertools import product
 from pathlib import Path
+
+import pandas as pd
+from pydantic import ValidationError
 
 from segmentation.catalog import table as table
 from segmentation.analysis.metrics.protocol import (
     ConsistencyRunInput,
+    ImpreciseActivationsRunInput,
     StabilityRunInput,
 )
 
 PROTOTYPE_PATH = "model.inputs.prototype_checkpoint.path"
-RUN_INPUTS = {"consistency": ConsistencyRunInput, "stability": StabilityRunInput}
+RUN_INPUTS = {
+    "consistency": ConsistencyRunInput,
+    "stability": StabilityRunInput,
+    "imprecise_activations": ImpreciseActivationsRunInput,
+}
 BOOLEAN_PARAMETERS = {
     "official_parts_only",
     "require_semantic_match",
     "exclude_background_centroid",
     "merge_left_right_parts",
 }
+RUN_INPUT_FIELDS = {"model", "grouping_model", "data_type"}
+
+
+def metric_parameters(metric):
+    """Return parameter fields available to a metric, excluding model identity inputs."""
+    try:
+        input_type = RUN_INPUTS[metric]
+    except KeyError as error:
+        raise ValueError(f"Unsupported metric: {metric}") from error
+    return {name: field for name, field in input_type.model_fields.items() if name not in RUN_INPUT_FIELDS}
+
+
+def parameter_candidates(metric, parameter, frame):
+    """Suggest observed and default values without implicitly varying a parameter."""
+    fields = metric_parameters(metric)
+    if parameter not in fields:
+        raise ValueError(f"{parameter} is not a parameter of {metric}.")
+    values = set()
+    column = f"parameters.{parameter}"
+    if column in frame:
+        values.update(frame.loc[frame["metric"] == metric, column].tolist())
+    field = fields[parameter]
+    if not field.is_required():
+        values.add(table.display_value(field.default))
+    if field.annotation is bool:
+        values.update(("false", "true"))
+    return sorted(value for value in values if value != table.MISSING)
+
+
+def _parameter_value(field, value):
+    if field.annotation is bool:
+        if value not in ("true", "false"):
+            raise ValueError("Boolean parameter values must be lowercase true or false.")
+        return value == "true"
+    if field.annotation is int:
+        return int(value)
+    if field.annotation is float:
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("Numeric parameter values must be finite.")
+        return number
+    return value
+
+
+def plan_configurations(metric, model_references, grouping_models, parameter_values, frame, root=None):
+    """Build only valid model/metric combinations; model metadata determines the dataset."""
+    input_type = RUN_INPUTS.get(metric)
+    if input_type is None:
+        raise ValueError(f"Unsupported metric: {metric}")
+    parameter_fields = metric_parameters(metric)
+    unknown_parameters = set(parameter_values) - set(parameter_fields)
+    if unknown_parameters:
+        raise ValueError(f"Unsupported {metric} parameters: {', '.join(sorted(unknown_parameters))}")
+    if not model_references:
+        raise ValueError("Select at least one registered model.")
+    if any(not values for values in parameter_values.values()):
+        raise ValueError("Select at least one candidate value for every varied parameter.")
+
+    parameter_names = list(parameter_values)
+    typed_values = {
+        name: [_parameter_value(parameter_fields[name], value) for value in parameter_values[name]]
+        for name in parameter_names
+    }
+    parameter_combinations = (
+        [dict(zip(parameter_names, values)) for values in product(*(typed_values[name] for name in parameter_names))]
+        if parameter_names
+        else [{}]
+    )
+    from segmentation.catalog.models import find_model, model_snapshot
+
+    configurations, errors = [], []
+    for reference in dict.fromkeys(model_references):
+        model = find_model(reference, root)
+        grouping_reference = grouping_models.get(model["dataset"])
+        grouping = find_model(grouping_reference, root) if grouping_reference else None
+        if grouping and grouping["dataset"] != model["dataset"]:
+            raise ValueError("Main and grouping models must use the same dataset.")
+        for parameters in parameter_combinations:
+            try:
+                run_input = input_type(
+                    model=model["model_id"],
+                    grouping_model=grouping["model_id"] if grouping else None,
+                    data_type=model["dataset"],
+                    **parameters,
+                )
+            except ValidationError as error:
+                errors.append(f"{model['name']}: {error}")
+                continue
+            run_values = run_input.model_dump()
+            candidate_record = {
+                "metric": metric,
+                "model": model_snapshot(model),
+                "grouping_model": model_snapshot(grouping) if grouping else {},
+                "dataset": {"name": model["dataset"]},
+                "parameters": {name: run_values[name] for name in parameter_fields},
+            }
+            flattened = table.flatten_record(candidate_record)
+            candidate_fields = table.input_columns(pd.DataFrame([flattened]))
+            input_fields = list(dict.fromkeys([*table.input_columns(frame), *candidate_fields]))
+            configuration = {}
+            for field in input_fields:
+                if field.startswith("parameters."):
+                    parameter = field[len("parameters.") :]
+                    value = run_values.get(parameter) if parameter in parameter_fields else None
+                else:
+                    value = flattened.get(field)
+                configuration[field] = table.display_value(value)
+            configurations.append(configuration)
+    if not configurations and errors:
+        raise ValueError("No valid configurations: " + "; ".join(errors))
+    return configurations, errors
+
+
+def matching_measurements(frame, configuration):
+    """Find exact existing entries; absent new fields cannot match old catalog rows."""
+    fields = table.input_columns(frame)
+    if not set(fields).issubset(configuration):
+        raise ValueError("The plan is missing catalog inputs; rebuild it after reloading the catalog.")
+    if any(field not in frame.columns and value != table.MISSING for field, value in configuration.items()):
+        return frame.iloc[0:0]
+    return table.filter_frame(frame, {field: [configuration[field]] for field in fields})
 
 
 def measurement_arguments(configuration, frame, root=None):
     """Translate a complete matrix cell to lossless, validated Hydra overrides."""
     metric = configuration.get("metric")
     if metric not in RUN_INPUTS:
-        raise ValueError("Only consistency and stability measurements can be submitted.")
+        raise ValueError("Only consistency, stability, and imprecise activation measurements can be submitted.")
     input_type = RUN_INPUTS[metric]
-    parameters = BOOLEAN_PARAMETERS | {"quantile", "threshold", "std_dev", "seed"}
-    allowed = set(table.input_columns(frame)) | {f"parameters.{name}" for name in parameters}
-    for field in configuration:
-        if field not in allowed:
-            raise ValueError(f"{field} cannot be set by the metric runner; remove it from Extra fields.")
     from segmentation.catalog.models import model_snapshot
     from segmentation.catalog.models import find_model
 
@@ -55,6 +180,12 @@ def measurement_arguments(configuration, frame, root=None):
             "dataset": {"name": model["dataset"]},
         }
     )
+    candidate_fields = table.input_columns(pd.DataFrame([expected]))
+    parameters = BOOLEAN_PARAMETERS | {"quantile", "threshold", "std_dev", "seed"}
+    allowed = set(table.input_columns(frame)) | set(candidate_fields) | {f"parameters.{name}" for name in parameters}
+    for field in configuration:
+        if field not in allowed:
+            raise ValueError(f"{field} cannot be set by the metric runner; remove it from Extra fields.")
     for field, value in configuration.items():
         if field == "metric" or field.startswith("parameters."):
             continue
@@ -164,11 +295,10 @@ def submit_measurement(configuration, checkout, root, python):
     if errors:
         raise ValueError("Unreadable catalog bundles prevent a reliable missing-measurement check.")
     fresh = table.records_frame(records)
-    if all(field in fresh for field in configuration):
-        if not table.filter_frame(fresh, {key: [value] for key, value in configuration.items()}).empty:
-            raise ValueError("This configuration now has a catalog entry; reload Coverage.")
-    else:
+    if not set(table.input_columns(fresh)).issubset(configuration):
         raise ValueError("Catalog inputs changed; reload Coverage before submitting.")
+    if not matching_measurements(fresh, configuration).empty:
+        raise ValueError("This configuration now has a catalog entry; reload Coverage.")
     arguments = measurement_arguments(configuration, fresh, root=root)
     python = validate_runtime(python)
     node = current_slurm_node()

@@ -20,7 +20,7 @@ from segmentation.catalog import jobs as jobs
 from segmentation.catalog import table as table
 from segmentation.catalog.architectures import ARCHITECTURES
 from segmentation.catalog.measurement import render_measurement, support_table_row
-from segmentation.catalog.models import list_models, register_model
+from segmentation.catalog.models import list_models, model_snapshot, register_model
 
 st.set_page_config(page_title="Measurement catalog", layout="wide")
 
@@ -99,10 +99,6 @@ with st.expander("Registered models", expanded=frame.empty):
 if errors:
     with st.expander(f"{len(errors)} unreadable bundles skipped"):
         catalog_dataframe(pd.DataFrame(errors, columns=["bundle", "error"]), hide_index=True)
-if frame.empty:
-    st.info("The catalog has no readable measurements yet.")
-    st.stop()
-
 inputs = table.input_columns(frame)
 other_fields = [
     column
@@ -116,7 +112,12 @@ with st.sidebar:
     if st.button("Reload catalog"):
         st.cache_data.clear()
         st.rerun()
-    statuses = st.multiselect("status", sorted(frame["status"].unique()), default=["complete"])
+    available_statuses = sorted(frame["status"].unique())
+    statuses = st.multiselect(
+        "status",
+        available_statuses,
+        default=["complete"] if "complete" in available_statuses else [],
+    )
     extras = st.multiselect(
         "Extra fields",
         other_fields,
@@ -214,161 +215,229 @@ with compare_tab:
         csv_download(comparison, "compare", "compare_csv")
 
 with aggregate_tab:
-    st.caption("Groups are formed from the filtered runs; inputs left out of the grouping are averaged over.")
-    default = [column for column in varying if column != "parameters.quantile"]
-    by = st.multiselect("Group by", fields, default=default)
-    summary = table.aggregate(view, by)
-    catalog_dataframe(
-        summary,
-        hide_index=True,
-        column_config={
-            name: st.column_config.NumberColumn(format="%.4f") for name in ("mean", "std", "min", "max", "pooled")
-        },
-    )
-    st.caption("`mean`: unweighted mean of run scores · `pooled`: Σ numerator / Σ denominator.")
-    csv_download(summary, "aggregate", "aggregate_csv")
+    if view.empty:
+        st.info("No measurements match the current filters; aggregate and pivot tables require catalog entries.")
+    else:
+        st.caption("Groups are formed from the filtered runs; inputs left out of the grouping are averaged over.")
+        default = [column for column in varying if column != "parameters.quantile"]
+        by = st.multiselect("Group by", fields, default=default)
+        summary = table.aggregate(view, by)
+        catalog_dataframe(
+            summary,
+            hide_index=True,
+            column_config={
+                name: st.column_config.NumberColumn(format="%.4f")
+                for name in ("mean", "std", "min", "max", "pooled")
+            },
+        )
+        st.caption("`mean`: unweighted mean of run scores · `pooled`: Σ numerator / Σ denominator.")
+        csv_download(summary, "aggregate", "aggregate_csv")
 
-    st.subheader("Pivot")
-    pivot_options = [column for column in fields if column not in by] or fields
-    pivot_column = st.selectbox(
-        "Column",
-        pivot_options,
-        index=pivot_options.index("parameters.quantile") if "parameters.quantile" in pivot_options else 0,
-    )
-    pivot = table.pivot_means(view, by, pivot_column)
-    catalog_dataframe(pivot, fields=fields, hide_index=True)
-    st.caption(
-        f"Cells are mean run scores; the last column averages the per-`{pivot_column}` means "
-        "and is blank when a value is missing."
-    )
-    csv_download(pivot, "pivot", "pivot_csv")
+        st.subheader("Pivot")
+        pivot_options = [column for column in fields if column not in by] or fields
+        pivot_column = st.selectbox(
+            "Column",
+            pivot_options,
+            index=pivot_options.index("parameters.quantile") if "parameters.quantile" in pivot_options else 0,
+        )
+        pivot = table.pivot_means(view, by, pivot_column)
+        catalog_dataframe(pivot, fields=fields, hide_index=True)
+        st.caption(
+            f"Cells are mean run scores; the last column averages the per-`{pivot_column}` means "
+            "and is blank when a value is missing."
+        )
+        csv_download(pivot, "pivot", "pivot_csv")
 
 with coverage_tab:
     st.caption(
-        "Build a full configuration grid, including measurements that do not exist yet. "
-        "This view uses its own filters and all catalog statuses, independently of the sidebar filters. "
-        "Sidebar Extra fields are included as additional inputs."
+        "Plan an article table by choosing the registered checkpoints, metric, parameters to vary, "
+        "and columns to show. A registration fixes its dataset and model metadata; only explicitly "
+        "selected parameter values are crossed."
     )
-    coverage_columns = st.multiselect(
-        "Compare against (column dimensions)",
-        fields,
-        default=["parameters.official_parts_only"] if "parameters.official_parts_only" in fields else [],
-        key="coverage_columns",
-    )
-    fixed_fields = st.multiselect(
-        "Fix inputs (filters)",
-        [field for field in fields if field not in coverage_columns],
-        key="coverage_fixed_fields",
-    )
-    fixed = {}
-    for field in fixed_fields:
-        fixed[field] = st.selectbox(
-            f"Fixed value: {field}",
-            sorted(frame[field].unique()),
-            accept_new_options=True,
-            key=f"coverage_fixed_{field}",
-        )
-    candidates_frame = table.filter_frame(frame, {field: [value] for field, value in fixed.items()})
-    candidates = {}
-    with st.expander("Candidate values (select existing values or type additional values)", expanded=True):
-        for field in fields:
-            if field in fixed:
-                continue
-            observed = sorted(candidates_frame[field].unique())
-            options = sorted(frame[field].unique())
-            candidates[field] = st.multiselect(
-                f"{'Column' if field in coverage_columns else 'Row'} values: {field}",
-                options,
-                default=observed or options,
-                accept_new_options=True,
-                key=f"coverage_values_{field}",
-            )
-    st.caption(
-        "Every non-fixed input outside the column dimensions becomes a row dimension. "
-        "All selected values are crossed, even if a combination is incompatible. "
-        "Use lowercase true/false for flags and the catalog's exact text representation for other inputs."
-    )
-    if not coverage_columns:
-        st.info("Choose at least one column dimension.")
+    registrations = list_models(root)
+    if not registrations:
+        st.info("Register model checkpoints before building a measurement plan.")
     else:
-        try:
-            coverage, missing = table.coverage_matrix(frame, coverage_columns, candidates, fixed)
-        except ValueError as error:
-            st.warning(str(error))
+        metric = st.selectbox("Metric", list(jobs.RUN_INPUTS), key="coverage_metric")
+        registration_by_name = {model["name"]: model for model in registrations}
+        model_names = st.multiselect(
+            "Registered models",
+            list(registration_by_name),
+            key="coverage_models",
+            help="Each selected checkpoint is evaluated only on its registered training dataset.",
+        )
+        selected_models = [registration_by_name[name] for name in model_names]
+        selected_datasets = sorted({model["dataset"] for model in selected_models})
+        grouping_models = {}
+        for dataset in selected_datasets:
+            eligible = [model for model in registrations if model["dataset"] == dataset]
+            eligible_by_id = {model["model_id"]: model for model in eligible}
+            grouping = st.selectbox(
+                f"Grouping model for {dataset}",
+                ["", *eligible_by_id],
+                format_func=lambda reference: (
+                    "None" if not reference else eligible_by_id[reference]["name"]
+                ),
+                key=f"coverage_grouping_{dataset}",
+            )
+            if grouping:
+                grouping_models[dataset] = grouping
+
+        parameter_fields = jobs.metric_parameters(metric)
+        varied_parameters = st.multiselect(
+            "Parameters to vary",
+            list(parameter_fields),
+            key=f"coverage_parameters_{metric}",
+            help="Unselected parameters use their metric defaults. Selected parameters form a Cartesian product.",
+        )
+        parameter_values = {}
+        for parameter in varied_parameters:
+            candidates = jobs.parameter_candidates(metric, parameter, frame)
+            parameter_values[parameter] = st.multiselect(
+                f"Values: {parameter}",
+                candidates,
+                key=f"coverage_values_{metric}_{parameter}",
+                help="Choose only the values needed for this article table.",
+            )
+
+        registration_columns = set(inputs)
+        for registration in registrations:
+            flattened = table.flatten_record(
+                {
+                    "model": model_snapshot(registration),
+                    "grouping_model": model_snapshot(registration),
+                }
+            )
+            registration_columns.update(table.input_columns(pd.DataFrame([flattened])))
+        available_columns = list(dict.fromkeys([
+            *inputs,
+            *sorted(registration_columns),
+            *[f"parameters.{name}" for name in parameter_fields],
+        ]))
+        display_columns = st.multiselect(
+            "Table columns",
+            available_columns,
+            default=[field for field in ("model.name", "dataset.name") if field in available_columns],
+            key=f"coverage_display_columns_{metric}",
+        )
+        if not display_columns:
+            st.info("Choose at least one table column.")
+        elif not selected_models:
+            st.info("Choose at least one registered model.")
         else:
-            st.caption(
-                f"{len(coverage):,} configurations · {len(missing):,} unmeasured cells. "
-                "Cells list original scores and run statuses; null means an existing run has no score. "
-                "Not measured means no catalog entry exists."
-            )
-            catalog_dataframe(coverage, hide_index=True)
-            csv_download(coverage, "coverage", "coverage_csv", "Download coverage CSV")
-            csv_download(missing, "missing_measurements", "coverage_missing_csv", "Download missing configurations CSV")
-            st.subheader("Run missing measurements")
-            st.caption(
-                "Select individual missing configurations below. Jobs request one GPU, eight CPUs and 32 GB "
-                "for up to four hours, pinned to this webapp host's Slurm node. "
-                "Invalid configurations must be corrected before submission."
-            )
-            selection_key = hashlib.sha256(missing.to_json(orient="split").encode()).hexdigest()
-            missing_event = catalog_dataframe(
-                missing,
-                hide_index=True,
-                on_select="rerun",
-                selection_mode="multi-row",
-                key=f"coverage_missing_{selection_key}",
-            )
-            chosen = missing.iloc[missing_event.selection.rows].to_dict("records")
-            checkout = Path(__file__).resolve().parents[2]
-            python = st.text_input(
-                "Evaluation Python executable",
-                value=os.environ.get("METRIC_PYTHON", str(checkout / ".venv/bin/python")),
-                key="coverage_python",
-                help="Use a full evaluation environment, not an app-only environment.",
-            )
-            plans, plan_errors = [], []
-            if chosen:
-                try:
-                    node = jobs.current_slurm_node()
-                    st.caption(f"Slurm nodelist: `{node}` (not editable; node-local checkout and caches).")
-                    for index, configuration in enumerate(chosen, start=1):
-                        try:
-                            arguments = jobs.measurement_arguments(configuration, frame, root=root)
-                            prior = jobs.submission_record(root, arguments)
-                            if prior is not None:
-                                raise ValueError(
-                                    f"Existing submission: {prior['status']}, job {prior.get('job_id', 'unknown')}. "
-                                    f"Receipt: {jobs.submission_path(root, arguments)}"
-                                )
-                            plans.append(shlex.join(jobs.slurm_command(checkout, root, node, arguments)))
-                        except (CatalogError, OSError, ValueError) as error:
-                            plan_errors.append(f"Selection {index}: {error}")
-                except (CatalogError, OSError, ValueError, subprocess.SubprocessError) as error:
-                    plan_errors.append(f"Slurm is unavailable on this host: {error}")
-            if plans:
-                st.code("\n".join(plans), language="bash")
-                st.caption(
-                    f"Jobs use `{python}` and write to `{root}`. "
-                    "Submission receipts and Slurm logs are stored under the catalog's submissions directory. "
-                    "Queued jobs remain absent from the matrix until they create a measurement bundle."
+            try:
+                configurations, planner_errors = jobs.plan_configurations(
+                    metric,
+                    [model["model_id"] for model in selected_models],
+                    grouping_models,
+                    parameter_values,
+                    frame,
+                    root=root,
                 )
-            for error in plan_errors:
-                st.warning(error)
-            if st.button(
-                "Run selected missing measurements",
-                disabled=not chosen or bool(plan_errors),
-                key="coverage_submit",
-            ):
-                outcomes = []
-                with st.spinner("Validating and submitting Slurm jobs…"):
-                    for configuration in chosen:
+            except (CatalogError, ValueError) as error:
+                st.warning(str(error))
+            else:
+                if planner_errors:
+                    with st.expander(f"{len(planner_errors)} invalid combinations omitted"):
+                        for error in planner_errors:
+                            st.write(error)
+                plan_rows, missing_configurations = [], []
+                for configuration in configurations:
+                    matches = jobs.matching_measurements(frame, configuration)
+                    scores = [None if pd.isna(value) else value for value in matches["score"]]
+                    statuses = matches["status"].tolist()
+                    result = "Measured" if not matches.empty else table.NOT_MEASURED
+                    plan_rows.append({
+                        **{field: configuration.get(field, table.MISSING) for field in display_columns},
+                        "Result": result,
+                        "Scores": json.dumps(scores),
+                        "Run statuses": ", ".join(statuses),
+                    })
+                    if matches.empty:
+                        missing_configurations.append(configuration)
+                plan_frame = pd.DataFrame(plan_rows)
+                st.caption(
+                    f"{len(configurations):,} valid configurations · "
+                    f"{len(missing_configurations):,} not measured."
+                )
+                st.dataframe(plan_frame, hide_index=True, use_container_width=True)
+                csv_download(plan_frame, "coverage_plan", "coverage_plan_csv", "Download table plan CSV")
+
+                if not frame.empty and len(missing_configurations) == 0:
+                    st.info("Every planned configuration already has a catalog entry.")
+                elif missing_configurations:
+                    st.subheader("Run missing measurements")
+                    st.caption(
+                        "Select rows to submit. Jobs are individually validated and pinned to this webapp host's "
+                        "Slurm node; checkpoints and datasets are not copied."
+                    )
+                    missing_frame = pd.DataFrame([
+                        {field: configuration.get(field, table.MISSING) for field in display_columns}
+                        for configuration in missing_configurations
+                    ])
+                    selection_key = hashlib.sha256(missing_frame.to_json(orient="split").encode()).hexdigest()
+                    missing_event = st.dataframe(
+                        missing_frame,
+                        hide_index=True,
+                        use_container_width=True,
+                        on_select="rerun",
+                        selection_mode="multi-row",
+                        key=f"coverage_missing_{selection_key}",
+                    )
+                    chosen = [
+                        missing_configurations[index]
+                        for index in missing_event.selection.rows
+                    ]
+                    checkout = Path(__file__).resolve().parents[2]
+                    python = st.text_input(
+                        "Evaluation Python executable",
+                        value=os.environ.get("METRIC_PYTHON", str(checkout / ".venv/bin/python")),
+                        key="coverage_python",
+                        help="Use a full evaluation environment, not an app-only environment.",
+                    )
+                    plans, plan_errors = [], []
+                    if chosen:
                         try:
-                            receipt = jobs.submit_measurement(configuration, checkout, root, python)
-                            outcomes.append(f"Submitted job {receipt['job_id']} on {receipt['node']}.")
-                        except (OSError, ValueError, subprocess.SubprocessError) as error:
-                            details = getattr(error, "stderr", None) or str(error)
-                            outcomes.append(f"Not submitted or submission uncertain: {details}")
-                st.session_state["coverage_submission_outcomes"] = outcomes
-                st.rerun()
-            for outcome in st.session_state.get("coverage_submission_outcomes", []):
-                st.write(outcome)
+                            node = jobs.current_slurm_node()
+                            st.caption(f"Slurm nodelist: `{node}` (not editable; node-local checkout and caches).")
+                            for index, configuration in enumerate(chosen, start=1):
+                                try:
+                                    arguments = jobs.measurement_arguments(configuration, frame, root=root)
+                                    prior = jobs.submission_record(root, arguments)
+                                    if prior is not None:
+                                        raise ValueError(
+                                            f"Existing submission: {prior['status']}, "
+                                            f"job {prior.get('job_id', 'unknown')}. "
+                                            f"Receipt: {jobs.submission_path(root, arguments)}"
+                                        )
+                                    plans.append(shlex.join(jobs.slurm_command(checkout, root, node, arguments)))
+                                except (CatalogError, OSError, ValueError) as error:
+                                    plan_errors.append(f"Selection {index}: {error}")
+                        except (CatalogError, OSError, ValueError, subprocess.SubprocessError) as error:
+                            plan_errors.append(f"Slurm is unavailable on this host: {error}")
+                    if plans:
+                        st.code("\n".join(plans), language="bash")
+                        st.caption(
+                            f"Jobs use `{python}` and write to `{root}`. Submission receipts and Slurm logs are "
+                            "stored under the catalog's submissions directory."
+                        )
+                    for error in plan_errors:
+                        st.warning(error)
+                    if st.button(
+                        "Run selected missing measurements",
+                        disabled=not chosen or bool(plan_errors),
+                        key="coverage_submit",
+                    ):
+                        outcomes = []
+                        with st.spinner("Validating and submitting Slurm jobs…"):
+                            for configuration in chosen:
+                                try:
+                                    receipt = jobs.submit_measurement(configuration, checkout, root, python)
+                                    outcomes.append(f"Submitted job {receipt['job_id']} on {receipt['node']}.")
+                                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                                    details = getattr(error, "stderr", None) or str(error)
+                                    outcomes.append(f"Not submitted or submission uncertain: {details}")
+                        st.session_state["coverage_submission_outcomes"] = outcomes
+                        st.rerun()
+                    for outcome in st.session_state.get("coverage_submission_outcomes", []):
+                        st.write(outcome)

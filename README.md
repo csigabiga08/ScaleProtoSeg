@@ -191,9 +191,9 @@ python -m segmentation.eval_test  <your_training_run_name> <training_stage> <bat
 
 ### Native consistency and stability measurements
 
-Consistency and stability use the shared metric catalog and runner. Imprecise
-activations use the same registered-model inputs and catalog output while
-measuring full-image semantic activation:
+Consistency, stability, and imprecise activations use the shared metric catalog
+and runner. Consistency and stability use the part-specific evaluation loop;
+imprecise activations measure full-image semantic activation:
 
 #### Imprecise activations
 
@@ -207,11 +207,6 @@ resized with nearest-neighbor interpolation; void labels are excluded, and
 Pascal VOC background is a semantic class. Per-image activation sums, pixel
 counts, and scores are retained in the observations artifact. Run it with a
 registered model and dataset:
-
-```bash
-sbatch scripts/run_metric.slurm imprecise_activations \
-  model=REGISTERED_MODEL data_type=pascal
-```
 
 ```bash
 sbatch scripts/run_metric.slurm imprecise_activations \
@@ -584,15 +579,14 @@ Start the app from the repository root and forward the port over SSH:
   mean of run scores; `pooled` is Σ numerator / Σ denominator. Groups always include
   `metric`. The pivot's last column averages per-column means and is blank when a
   column value is missing for that row.
-- **Coverage**: choose one or more column dimensions and fix other inputs with
-  this view's filters. Every remaining input automatically becomes a row dimension.
-  Select candidate values or type additional values to generate the full Cartesian
-  grid, including entirely unmeasured rows. Cells retain individual scores and run
-  statuses; `null` is a missing score in an existing run, while `Not measured`
-  means no entry exists. This view includes all statuses and ignores sidebar
-  filters, but includes selected Extra fields. Download the matrix or a flat list
-  of missing configurations as CSV. Fix inputs or narrow values if the grid exceeds
-  100,000 cells; incompatible combinations are not automatically excluded.
+- **Coverage**: construct an article-table plan by selecting a metric, registered
+  checkpoints, the metric parameters to vary, candidate values, and display columns.
+  Each registration supplies its model metadata and training dataset, so checkpoints
+  are never crossed with unrelated datasets. An optional grouping model is selected
+  per dataset and must match it. Only selected parameter values are crossed;
+  unselected parameters use their metric defaults. The plan shows existing scores
+  and statuses beside `Not measured` configurations, and can be downloaded as CSV.
+  The planner works before any measurements exist.
 
 In **Coverage**, select rows in the missing-configurations table, review the
 generated commands, choose a full evaluation Python environment, and click
@@ -600,19 +594,15 @@ generated commands, choose a full evaluation Python environment, and click
 through `scripts/run_metric.slurm`, pinned to the Slurm node hosting the app
 (`--nodelist`, not user-editable), because checkout and dataset caches may be
 node-local. The wrapper requests one GPU, eight CPUs, 32 GB and four hours.
+Coverage submissions support consistency, stability, and imprecise activations.
 `METRIC_PYTHON` supplies the interpreter default; an app-only environment cannot
 run measurements. Jobs inherit the app's environment and use this checkout's
 `.env` settings and catalog root.
 
 Submission validates typed metric inputs, dataset-specific flags and local
-checkpoint paths. Missing metadata (`∅`) is not a runnable value for a metric's
-own parameters; choose explicit values. Parameters belonging only to the other
-metric must remain `∅`. The prototype checkpoint is inferred only when the
-model/stage/dataset identifies a unique recorded path. To supply an explicit
-checkpoint (including for a new model), select
-`model.inputs.prototype_checkpoint.path` in **Extra fields** and add its path
-as a candidate or fixed value. Other metadata-only Extra fields cannot be
-submitted as metric inputs.
+checkpoint registrations and dataset-specific metric constraints. The checkpoint
+is resolved from its registration; model and dataset metadata are not user-entered
+dimensions.
 
 Catalog coverage is rechecked before submission, including running and failed
 entries. Job IDs and submission receipts are stored under
