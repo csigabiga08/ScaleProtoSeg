@@ -137,6 +137,61 @@ class CatalogCliTests(unittest.TestCase):
         code, text = self.run_cli("validate", "cli")
         self.assertEqual((code, json.loads(text)[0]["status"]), (0, "valid"))
 
+    def test_archive_preserves_bundle_and_receipt_and_removes_it_from_catalog(self):
+        bundle = write_measurement(self.root, make_record("archive-me"), [obs("a")])
+        before = {path.name: path.read_bytes() for path in bundle.iterdir()}
+        receipts = self.root / "submissions"
+        receipts.mkdir()
+        receipt = receipts / "receipt.json"
+        receipt.write_text('{"status": "submitted"}')
+
+        archived = catalog_cli.archive_measurement(self.root, "archive-me")
+        self.assertEqual(archived.parent.parent, self.root / "archived_measurements")
+        self.assertEqual({path.name: path.read_bytes() for path in archived.iterdir()}, before)
+        self.assertFalse(bundle.exists())
+        self.assertEqual(receipt.read_text(), '{"status": "submitted"}')
+        self.assertEqual(catalog_cli.find_records(all_status=True), [])
+        self.assertEqual(load_observations(archived)[1][0]["sample_id"], "a")
+
+    def test_archive_rechecks_status_and_rejects_unsafe_bundle_paths(self):
+        running = write_measurement(self.root, make_record("running", status="running"))
+        with self.assertRaisesRegex(CatalogError, "Running measurements"):
+            catalog_cli.archive_measurement(self.root, "running")
+        self.assertTrue(running.exists())
+        failed = write_measurement(self.root, make_record("failed", status="failed"))
+        with self.assertRaisesRegex(CatalogError, "Invalid measurement ID"):
+            catalog_cli.archive_measurement(self.root, "../failed")
+        (self.root / "measurements" / "link").symlink_to(failed, target_is_directory=True)
+        with self.assertRaisesRegex(CatalogError, "symlink"):
+            catalog_cli.archive_measurement(self.root, "link")
+        (failed / "result.json").write_text(json.dumps(make_record("other", status="failed")))
+        with self.assertRaisesRegex(CatalogError, "does not match"):
+            catalog_cli.archive_measurement(self.root, "failed")
+        self.assertTrue(failed.exists())
+
+    def test_archive_failed_bundle_and_do_not_overwrite_prior_archive(self):
+        write_measurement(self.root, make_record("failed", status="failed"))
+        first = catalog_cli.archive_measurement(self.root, "failed")
+        write_measurement(self.root, make_record("failed", status="failed"))
+        second = catalog_cli.archive_measurement(self.root, "failed")
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.is_dir())
+        self.assertTrue(second.is_dir())
+
+    def test_bulk_archive_keeps_successes_and_reports_protected_or_missing_bundles(self):
+        write_measurement(self.root, make_record("complete"), [obs("a")])
+        write_measurement(self.root, make_record("failed", status="failed"))
+        write_measurement(self.root, make_record("running", status="running"))
+        archived, errors = catalog_cli.archive_measurements(
+            self.root, ["complete", "running", "missing", "failed"]
+        )
+        self.assertEqual({path.name for path in archived}, {"complete", "failed"})
+        self.assertEqual([measurement_id for measurement_id, _ in errors], ["running", "missing"])
+        self.assertIn("Running measurements", errors[0][1])
+        self.assertEqual(
+            [record["measurement_id"] for record in catalog_cli.find_records(all_status=True)], ["running"]
+        )
+
     def test_validate_reports_invalid_bundles(self):
         bundle = write_measurement(self.root, make_record("tampered"), [obs("a")])
         (bundle / "observations.csv").write_text("corrupt\n")

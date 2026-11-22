@@ -19,6 +19,7 @@ from segmentation.catalog import CatalogError
 from segmentation.catalog import jobs as jobs
 from segmentation.catalog import table as table
 from segmentation.catalog.architectures import ARCHITECTURES
+from segmentation.catalog.cli import archive_measurements
 from segmentation.catalog.measurement import render_measurement, support_table_row
 from segmentation.catalog.models import list_models, model_snapshot, register_model
 
@@ -44,6 +45,34 @@ def catalog_dataframe(frame, *, fields=None, column_config=None, **kwargs):
     return st.dataframe(grouped, column_config=config, **kwargs)
 
 
+def archive_controls(root, selected_records, *, source):
+    measurement_ids = [record["measurement_id"] for record in selected_records]
+    with st.expander("Remove measurement from catalog"):
+        st.caption(f"{len(measurement_ids)} selected: " + ", ".join(f"`{item}`" for item in measurement_ids))
+        st.warning(
+            "Archiving removes this measurement from catalog views, but preserves the bundle, "
+            "checkpoint files, Slurm logs and submission receipt. Running measurements cannot be archived. "
+            "An existing receipt still prevents resubmission."
+        )
+        running = [record["measurement_id"] for record in selected_records if record["status"] == "running"]
+        if running:
+            st.info("Running measurements will not be archived: " + ", ".join(running))
+        key = hashlib.sha256(json.dumps(measurement_ids).encode()).hexdigest()
+        if st.button("Archive selected measurements", key=f"archive_{source}_{key}"):
+            archived, errors = archive_measurements(root, measurement_ids)
+            if archived:
+                st.cache_data.clear()
+                st.session_state["archive_outcomes"] = {
+                    "archived": [str(path) for path in archived],
+                    "errors": errors,
+                }
+                if source == "detail":
+                    del st.query_params["measurement"]
+                st.rerun()
+            for measurement_id, error in errors:
+                st.error(f"Could not archive {measurement_id}: {error}")
+
+
 try:
     root = table.read_catalog_root()
 except CatalogError as error:
@@ -59,10 +88,17 @@ if measurement_id:
     if measurement_id not in records:
         st.error("Measurement not found in this catalog.")
     else:
-        render_measurement(root, records[measurement_id])
+        record = records[measurement_id]
+        render_measurement(root, record)
+        archive_controls(root, [record], source="detail")
     st.stop()
 st.title("Measurement catalog")
 st.caption(f"`{root}` · {len(frame)} measurements")
+if "archive_outcomes" in st.session_state:
+    outcomes = st.session_state.pop("archive_outcomes")
+    st.success(f"Archived {len(outcomes['archived'])} measurement(s): " + ", ".join(outcomes["archived"]))
+    for measurement_id, error in outcomes["errors"]:
+        st.error(f"Could not archive {measurement_id}: {error}")
 with st.expander("Registered models", expanded=frame.empty):
     models = list_models(root)
     catalog_dataframe(pd.json_normalize(models), hide_index=True)
@@ -173,12 +209,13 @@ with runs_tab:
         shown = shown.join(diagnostics)
     linked = shown.copy()
     linked["measurement_id"] = ["?" + urlencode({"measurement": pid}) for pid in shown["measurement_id"]]
+    selection_key = hashlib.sha256(json.dumps(list(shown.index)).encode()).hexdigest()
     event = catalog_dataframe(
         linked,
         hide_index=True,
         on_select="rerun",
-        selection_mode="single-row",
-        key="runs",
+        selection_mode="multi-row",
+        key=f"runs_{selection_key}",
         column_config={
             "score": st.column_config.NumberColumn(format="%.4f"),
             "measurement_id": st.column_config.LinkColumn(display_text=r"\?measurement=(.*)", alignment="left"),
@@ -190,6 +227,8 @@ with runs_tab:
     if len(selected) == 1:
         measurement_id = selected[0]
         st.link_button("Open selected measurement", "?" + urlencode({"measurement": measurement_id}))
+    if selected:
+        archive_controls(root, [records[measurement_id] for measurement_id in selected], source="runs")
     else:
         st.caption("Open a measurement link for details and analysis. The Compare tab uses all filtered runs.")
 
@@ -375,7 +414,9 @@ with coverage_tab:
                         {field: configuration.get(field, table.MISSING) for field in display_columns}
                         for configuration in missing_configurations
                     ])
-                    selection_key = hashlib.sha256(missing_frame.to_json(orient="split").encode()).hexdigest()
+                    selection_key = hashlib.sha256(
+                        json.dumps(missing_configurations, sort_keys=True).encode()
+                    ).hexdigest()
                     missing_event = st.dataframe(
                         missing_frame,
                         hide_index=True,
@@ -395,26 +436,29 @@ with coverage_tab:
                         key="coverage_python",
                         help="Use a full evaluation environment, not an app-only environment.",
                     )
-                    plans, plan_errors = [], []
+                    plans, plan_errors, retry_candidates = [], [], []
                     if chosen:
                         try:
                             node = jobs.current_slurm_node()
                             st.caption(f"Slurm nodelist: `{node}` (not editable; node-local checkout and caches).")
-                            for index, configuration in enumerate(chosen, start=1):
-                                try:
-                                    arguments = jobs.measurement_arguments(configuration, frame, root=root)
-                                    prior = jobs.submission_record(root, arguments)
-                                    if prior is not None:
-                                        raise ValueError(
-                                            f"Existing submission: {prior['status']}, "
-                                            f"job {prior.get('job_id', 'unknown')}. "
-                                            f"Receipt: {jobs.submission_path(root, arguments)}"
-                                        )
-                                    plans.append(shlex.join(jobs.slurm_command(checkout, root, node, arguments)))
-                                except (CatalogError, OSError, ValueError) as error:
-                                    plan_errors.append(f"Selection {index}: {error}")
                         except (CatalogError, OSError, ValueError, subprocess.SubprocessError) as error:
+                            node = None
                             plan_errors.append(f"Slurm is unavailable on this host: {error}")
+                        for index, configuration in enumerate(chosen, start=1):
+                            try:
+                                arguments = jobs.measurement_arguments(configuration, frame, root=root)
+                                prior = jobs.submission_record(root, arguments)
+                                if prior is not None:
+                                    retry_candidates.append((index, configuration))
+                                    raise ValueError(
+                                        f"Existing submission: {prior['status']}, "
+                                        f"job {prior.get('job_id', 'unknown')}. "
+                                        f"Receipt: {jobs.submission_path(root, arguments)}"
+                                    )
+                                if node is not None:
+                                    plans.append(shlex.join(jobs.slurm_command(checkout, root, node, arguments)))
+                            except (CatalogError, OSError, ValueError) as error:
+                                plan_errors.append(f"Selection {index}: {error}")
                     if plans:
                         st.code("\n".join(plans), language="bash")
                         st.caption(
@@ -423,6 +467,27 @@ with coverage_tab:
                         )
                     for error in plan_errors:
                         st.warning(error)
+                    if retry_candidates:
+                        st.caption(
+                            "Allow retry archives the selected receipts only after Slurm confirms each job "
+                            "is terminal and the catalog has no matching measurement. "
+                            "Unknown or uncertain jobs require manual review."
+                        )
+                        if st.button("Allow retry for selected submissions", key="coverage_retry"):
+                            outcomes = []
+                            with st.spinner("Checking Slurm and archiving eligible receipts…"):
+                                for index, configuration in retry_candidates:
+                                    try:
+                                        released = jobs.release_submission_for_retry(configuration, root)
+                                        outcomes.append(
+                                            f"Selection {index}: job {released['job_id']} "
+                                            f"({released['state']}); receipt archived at {released['receipt']}."
+                                        )
+                                    except (CatalogError, OSError, ValueError, subprocess.SubprocessError) as error:
+                                        details = getattr(error, "stderr", None) or str(error)
+                                        outcomes.append(f"Selection {index}: retry blocked: {details}")
+                            st.session_state["coverage_retry_outcomes"] = outcomes
+                            st.rerun()
                     if st.button(
                         "Run selected missing measurements",
                         disabled=not chosen or bool(plan_errors),
@@ -440,4 +505,6 @@ with coverage_tab:
                         st.session_state["coverage_submission_outcomes"] = outcomes
                         st.rerun()
                     for outcome in st.session_state.get("coverage_submission_outcomes", []):
+                        st.write(outcome)
+                    for outcome in st.session_state.get("coverage_retry_outcomes", []):
                         st.write(outcome)

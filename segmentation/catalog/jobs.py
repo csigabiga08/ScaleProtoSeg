@@ -1,5 +1,6 @@
 """Plan and submit explicit coverage configurations through the metric Slurm wrapper."""
 
+import fcntl
 import hashlib
 import json
 import math
@@ -7,6 +8,8 @@ import os
 import re
 import socket
 import subprocess
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
@@ -34,6 +37,18 @@ BOOLEAN_PARAMETERS = {
     "merge_left_right_parts",
 }
 RUN_INPUT_FIELDS = {"model", "grouping_model", "data_type"}
+TERMINAL_JOB_STATES = {
+    "BOOT_FAIL",
+    "CANCELLED",
+    "COMPLETED",
+    "DEADLINE",
+    "FAILED",
+    "NODE_FAIL",
+    "OUT_OF_MEMORY",
+    "PREEMPTED",
+    "REVOKED",
+    "TIMEOUT",
+}
 
 
 def metric_parameters(metric):
@@ -272,6 +287,102 @@ def submission_record(root, arguments):
     return json.loads(path.read_text()) if path.exists() else None
 
 
+@contextmanager
+def submission_lock(root, arguments):
+    locks = Path(root) / "submissions" / ".locks"
+    locks.mkdir(parents=True, exist_ok=True)
+    with (locks / (submission_path(root, arguments).stem + ".lock")).open("a") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def _missing_arguments(configuration, root):
+    records, errors = table.load_records(root)
+    if errors:
+        raise ValueError("Unreadable catalog bundles prevent a reliable missing-measurement check.")
+    fresh = table.records_frame(records)
+    if not set(table.input_columns(fresh)).issubset(configuration):
+        raise ValueError("Catalog inputs changed; reload Coverage before submitting.")
+    if not matching_measurements(fresh, configuration).empty:
+        raise ValueError("This configuration now has a catalog entry; reload Coverage.")
+    return measurement_arguments(configuration, fresh, root=root)
+
+
+def terminal_job_state(job_id):
+    """Require an unambiguous terminal accounting record and no active queue entry."""
+    job_id = str(job_id)
+    if not job_id.isdigit():
+        raise ValueError("The receipt has no valid Slurm job ID; inspect it manually.")
+    accounting = subprocess.run(
+        [
+            "sacct",
+            "--noheader",
+            "--parsable2",
+            "--allocations",
+            "--duplicates",
+            f"--jobs={job_id}",
+            "--format=JobIDRaw,State",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    rows = [line.strip().split("|") for line in accounting.stdout.splitlines() if line.strip()]
+    matching = [row for row in rows if len(row) == 2 and row[0] == job_id]
+    if len(matching) != 1 or len(rows) != 1:
+        raise ValueError(f"No unambiguous accounting record for Slurm job {job_id}; inspect it manually.")
+    parts = matching[0][1].split()
+    if not parts:
+        raise ValueError(f"No accounting state for Slurm job {job_id}; inspect it manually.")
+    state = parts[0].rstrip("+")
+    if state not in TERMINAL_JOB_STATES:
+        raise ValueError(f"Slurm job {job_id} is {state}; retry is blocked.")
+    queue = subprocess.run(
+        ["squeue", "--noheader", "--states=all", "--format=%i|%T"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    for line in queue.stdout.splitlines():
+        fields = line.strip().split("|")
+        if len(fields) != 2:
+            raise ValueError("Unexpected Slurm queue output; inspect the job manually.")
+        if fields[0] == job_id and fields[1] not in TERMINAL_JOB_STATES:
+            raise ValueError(f"Slurm job {job_id} is still {fields[1]}; retry is blocked.")
+    return state
+
+
+def release_submission_for_retry(configuration, root):
+    """Archive a terminal job's receipt after rechecking that no measurement exists."""
+    arguments = _missing_arguments(configuration, root)
+    with submission_lock(root, arguments):
+        if _missing_arguments(configuration, root) != arguments:
+            raise ValueError("Measurement inputs changed; reload Coverage before retrying.")
+        receipt_path = submission_path(root, arguments)
+        receipt = submission_record(root, arguments)
+        if receipt is None:
+            raise ValueError("There is no submission receipt for this configuration.")
+        if receipt.get("status") != "submitted" or receipt.get("arguments") != arguments:
+            raise ValueError("The receipt is uncertain or does not match these inputs; inspect it manually.")
+        state = terminal_job_state(receipt.get("job_id"))
+        if _missing_arguments(configuration, root) != arguments:
+            raise ValueError("Measurement inputs changed; reload Coverage before retrying.")
+        slot = Path(root) / "submissions" / "archived" / receipt_path.stem / str(uuid.uuid4())
+        slot.mkdir(parents=True)
+        destination = slot / receipt_path.name
+        try:
+            receipt_path.rename(destination)
+        except OSError:
+            slot.rmdir()
+            raise
+        return {"job_id": receipt["job_id"], "state": state, "receipt": str(destination)}
+
+
 def slurm_command(checkout, root, node, arguments):
     return [
         "sbatch",
@@ -291,15 +402,7 @@ def submit_measurement(configuration, checkout, root, python):
     A failed or uncertain submission retains its receipt: an operator must inspect
     it before retrying, rather than risk submitting a second job after a timeout.
     """
-    records, errors = table.load_records(root)
-    if errors:
-        raise ValueError("Unreadable catalog bundles prevent a reliable missing-measurement check.")
-    fresh = table.records_frame(records)
-    if not set(table.input_columns(fresh)).issubset(configuration):
-        raise ValueError("Catalog inputs changed; reload Coverage before submitting.")
-    if not matching_measurements(fresh, configuration).empty:
-        raise ValueError("This configuration now has a catalog entry; reload Coverage.")
-    arguments = measurement_arguments(configuration, fresh, root=root)
+    arguments = _missing_arguments(configuration, root)
     python = validate_runtime(python)
     node = current_slurm_node()
     checkout, root = Path(checkout).resolve(), Path(root).resolve()
@@ -307,8 +410,6 @@ def submit_measurement(configuration, checkout, root, python):
         raise ValueError("The metric Slurm wrapper is missing from this checkout.")
     if not os.access(root / "measurements", os.W_OK):
         raise ValueError("The catalog measurements directory must be writable by the job user.")
-    receipt = submission_path(root, arguments)
-    receipt.parent.mkdir(exist_ok=True)
     record = {
         "status": "submitting",
         "configuration": configuration,
@@ -318,36 +419,40 @@ def submit_measurement(configuration, checkout, root, python):
         "checkout": str(checkout),
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
     }
-    try:
-        with receipt.open("x") as stream:
-            json.dump(record, stream, indent=2)
-    except FileExistsError as error:
-        raise ValueError(f"This configuration already has a submission receipt: {receipt}") from error
     environment = {
         **os.environ,
         "MEASUREMENT_CATALOG_ROOT": str(root),
         "SCALEPROTOSEG_ROOT": str(checkout),
         "METRIC_PYTHON": str(python),
     }
-    try:
-        result = subprocess.run(
-            slurm_command(checkout, root, node, arguments),
-            cwd=checkout,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=30,
-        )
-        job_id = result.stdout.strip().split(";")[0]
-        if not job_id.isdigit():
-            raise ValueError(f"Unexpected sbatch response: {result.stdout.strip()}")
-        record.update(status="submitted", job_id=job_id)
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        record.update(status="submission_error", error=str(error))
-        raise
-    finally:
-        temporary = receipt.with_suffix(".tmp")
-        temporary.write_text(json.dumps(record, indent=2))
-        temporary.replace(receipt)
+    with submission_lock(root, arguments):
+        if _missing_arguments(configuration, root) != arguments:
+            raise ValueError("Measurement inputs changed; reload Coverage before submitting.")
+        receipt = submission_path(root, arguments)
+        try:
+            with receipt.open("x") as stream:
+                json.dump(record, stream, indent=2)
+        except FileExistsError as error:
+            raise ValueError(f"This configuration already has a submission receipt: {receipt}") from error
+        try:
+            result = subprocess.run(
+                slurm_command(checkout, root, node, arguments),
+                cwd=checkout,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30,
+            )
+            job_id = result.stdout.strip().split(";")[0]
+            if not job_id.isdigit():
+                raise ValueError(f"Unexpected sbatch response: {result.stdout.strip()}")
+            record.update(status="submitted", job_id=job_id)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            record.update(status="submission_error", error=str(error))
+            raise
+        finally:
+            temporary = receipt.with_suffix(".tmp")
+            temporary.write_text(json.dumps(record, indent=2))
+            temporary.replace(receipt)
     return record

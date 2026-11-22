@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+import uuid
 from pathlib import Path
 
 from segmentation.catalog import (
@@ -138,6 +139,46 @@ def find_measurement(root, measurement_id):
         bundle = matches[0]
     record = _load_record(bundle)
     return bundle, record
+
+
+def archive_measurement(root, measurement_id):
+    """Move a finished bundle out of the active catalog without changing its contents."""
+    root = Path(root)
+    measurement_id = str(measurement_id)
+    if measurement_id in ("", ".", "..") or Path(measurement_id).name != measurement_id:
+        raise CatalogError(f"Invalid measurement ID: {measurement_id!r}")
+    bundle = root / "measurements" / measurement_id
+    if bundle.is_symlink() or not bundle.is_dir():
+        raise CatalogError(f"Measurement bundle is missing or is a symlink: {measurement_id}")
+    record = _load_record(bundle)
+    if record["measurement_id"] != measurement_id:
+        raise CatalogError("Measurement ID does not match the bundle directory.")
+    if record["status"] == "running":
+        raise CatalogError("Running measurements cannot be archived.")
+    archive = root / "archived_measurements"
+    if archive.is_symlink():
+        raise CatalogError("The measurement archive must not be a symlink.")
+    archive.mkdir(exist_ok=True)
+    slot = archive / str(uuid.uuid4())
+    slot.mkdir()
+    destination = slot / measurement_id
+    try:
+        bundle.rename(destination)
+    except OSError:
+        slot.rmdir()
+        raise
+    return destination
+
+
+def archive_measurements(root, measurement_ids):
+    """Archive each selected bundle, reporting failures without losing successful moves."""
+    archived, errors = [], []
+    for measurement_id in dict.fromkeys(measurement_ids):
+        try:
+            archived.append(archive_measurement(root, measurement_id))
+        except (CatalogError, OSError) as error:
+            errors.append((measurement_id, str(error)))
+    return archived, errors
 
 
 def validate_measurement(bundle):

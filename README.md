@@ -569,6 +569,13 @@ Start the app from the repository root and forward the port over SSH:
   parts are undefined, not zero. Existing CSVs cannot recover the source class of
   foreign part IDs included during measurement. The heatmap shows up to 200 chosen
   prototypes; CSV downloads retain the full matrix, mean vectors and shared-part counts.
+  Select one or more measurements in **Runs**, or open a measurement's detail page,
+  then use **Remove measurement from catalog** to archive the selected bundles. Running
+  measurements cannot be archived. The bundle is moved to
+  `<catalog-root>/archived_measurements/<archive-id>/<measurement-id>`;
+  to restore it, move that directory back to `<catalog-root>/measurements/` only if
+  no bundle with that ID exists. Checkpoints, logs and submission receipts are left
+  untouched; an existing receipt still blocks resubmission.
 - **Compare**: choose a boolean flag to find catalog entry pairs where every other
   input (including quantile) and selected extra field matches. The score has
   **Off**/**On** sub-columns containing lists of the original scores, preserving
@@ -599,20 +606,24 @@ Coverage submissions support consistency, stability, and imprecise activations.
 run measurements. Jobs inherit the app's environment and use this checkout's
 `.env` settings and catalog root.
 
-Submission validates typed metric inputs, dataset-specific flags and local
-checkpoint registrations and dataset-specific metric constraints. The checkpoint
-is resolved from its registration; model and dataset metadata are not user-entered
-dimensions.
+Submission validates typed metric inputs, dataset-specific constraints and local
+checkpoint registrations. The checkpoint is resolved from its registration; model
+and dataset metadata are not user-entered dimensions.
 
 Catalog coverage is rechecked before submission, including running and failed
 entries. Job IDs and submission receipts are stored under
 `<catalog-root>/submissions/`, with logs named `metric-<job-id>.out`. Receipts
 prevent repeated submissions across reloads and app sessions; a queued job
 appears in the measurement catalog only when the calculator creates its bundle.
-If submission fails or times out, inspect Slurm and the receipt before manually
-removing that specific receipt to allow a retry. The catalog and its measurements
-directory must be writable by the app/job user. Serve the app only to trusted
-operators: the launch button submits jobs as the account running Streamlit.
+To retry, first archive any matching measurement, select the missing configuration
+in **Coverage**, and choose **Allow retry for selected submissions**. The app
+rechecks the catalog and Slurm; if the job is terminal and not active in the queue, it
+archives its receipt under `<catalog-root>/submissions/archived/` and permits a
+new submission. Receipts with unknown job IDs, uncertain submission outcomes,
+unavailable or ambiguous Slurm records, or active jobs require manual review.
+Receipt changes do not cancel jobs. The catalog and its measurements directory
+must be writable by the app/job user. Serve the app only to trusted operators:
+the launch button submits jobs as the account running Streamlit.
 
 ## 🥇 Performance
 

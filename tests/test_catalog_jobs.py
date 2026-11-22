@@ -293,6 +293,89 @@ class CatalogJobsTest(unittest.TestCase):
                 jobs.submit_measurement(self.configuration, self.root, self.root, "python")
             self.assertEqual(run.call_count, 1)
 
+    def _write_receipt(self, *, status="submitted", job_id="12345"):
+        arguments = jobs.measurement_arguments(self.configuration, self.frame, root=self.root)
+        path = jobs.submission_path(self.root, arguments)
+        path.parent.mkdir(exist_ok=True)
+        receipt = {"status": status, "job_id": job_id, "arguments": arguments}
+        path.write_text(json.dumps(receipt))
+        return path, receipt
+
+    def test_retry_archives_terminal_receipt_and_allows_new_submission(self):
+        path, receipt = self._write_receipt()
+        queue = subprocess.CompletedProcess([], 0, stdout="")
+        accounting = subprocess.CompletedProcess([], 0, stdout="12345|FAILED\n")
+        with patch.object(jobs.table, "load_records", return_value=([self.record], [])), patch.object(
+            jobs.subprocess, "run", side_effect=[accounting, queue]
+        ):
+            result = jobs.release_submission_for_retry(self.configuration, self.root)
+        self.assertEqual((result["job_id"], result["state"]), ("12345", "FAILED"))
+        self.assertFalse(path.exists())
+        self.assertEqual(json.loads(Path(result["receipt"]).read_text()), receipt)
+        with patch.object(jobs.table, "load_records", return_value=([self.record], [])), patch.object(
+            jobs, "validate_runtime", return_value=self.root / "python"
+        ), patch.object(jobs, "current_slurm_node", return_value="maxitank"), patch.object(
+            jobs.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="12346\n")
+        ):
+            self.assertEqual(
+                jobs.submit_measurement(self.configuration, self.root, self.root, "python")["job_id"],
+                "12346",
+            )
+        self.assertEqual(json.loads(Path(result["receipt"]).read_text()), receipt)
+
+    def test_retry_blocks_running_missing_and_ambiguous_slurm_records(self):
+        cases = [
+            ("12345|RUNNING\n", "12345|FAILED\n", "still RUNNING"),
+            ("", "12345|PENDING\n", "PENDING"),
+            ("", "", "unambiguous"),
+            ("", "12345|FAILED\n12345|FAILED\n", "unambiguous"),
+            ("", "12345|\n", "No accounting state"),
+        ]
+        for queue, accounting, expected in cases:
+            with self.subTest(queue=queue, accounting=accounting):
+                path, _ = self._write_receipt()
+                responses = [
+                    subprocess.CompletedProcess([], 0, stdout=accounting),
+                    subprocess.CompletedProcess([], 0, stdout=queue),
+                ]
+                with patch.object(jobs.table, "load_records", return_value=([self.record], [])), patch.object(
+                    jobs.subprocess, "run", side_effect=responses
+                ), self.assertRaisesRegex(ValueError, expected):
+                    jobs.release_submission_for_retry(self.configuration, self.root)
+                self.assertTrue(path.exists())
+
+    def test_retry_keeps_uncertain_receipt_and_rechecks_catalog(self):
+        path, _ = self._write_receipt(status="submission_error", job_id=None)
+        with patch.object(jobs.table, "load_records", return_value=([self.record], [])), patch.object(
+            jobs.subprocess, "run"
+        ) as run:
+            with self.assertRaisesRegex(ValueError, "uncertain"):
+                jobs.release_submission_for_retry(self.configuration, self.root)
+            run.assert_not_called()
+        current = {**self.record, "parameters": {**self.record["parameters"], "official_parts_only": True}}
+        with patch.object(jobs.table, "load_records", return_value=([current], [])):
+            with self.assertRaisesRegex(ValueError, "catalog entry"):
+                jobs.release_submission_for_retry(self.configuration, self.root)
+        self.assertTrue(path.exists())
+
+    def test_retry_keeps_receipt_when_slurm_is_unavailable(self):
+        path, _ = self._write_receipt()
+        with patch.object(jobs.table, "load_records", return_value=([self.record], [])), patch.object(
+            jobs.subprocess, "run", side_effect=subprocess.TimeoutExpired("squeue", 30)
+        ), self.assertRaises(subprocess.TimeoutExpired):
+            jobs.release_submission_for_retry(self.configuration, self.root)
+        self.assertTrue(path.exists())
+
+    def test_retry_rechecks_catalog_after_slurm_lookup(self):
+        path, _ = self._write_receipt()
+        current = {**self.record, "parameters": {**self.record["parameters"], "official_parts_only": True}}
+        with patch.object(
+            jobs.table, "load_records", side_effect=[([self.record], []), ([self.record], []), ([current], [])]
+        ), patch.object(jobs, "terminal_job_state", return_value="FAILED"):
+            with self.assertRaisesRegex(ValueError, "catalog entry"):
+                jobs.release_submission_for_retry(self.configuration, self.root)
+        self.assertTrue(path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
