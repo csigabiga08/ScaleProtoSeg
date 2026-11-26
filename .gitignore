@@ -176,6 +176,7 @@ pretrained_models
 *.zip
 
 *.pdf
+!docs/supplement.pdf
 models/
 
 # Data

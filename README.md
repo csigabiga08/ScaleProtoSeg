@@ -8,6 +8,8 @@ The work accompanies the paper *Towards Better Interpretability Metrics for Expl
 Semantic Segmentation* (Szenkovits, Portik, Bodó; submitted to ESANN 2027). It shows how
 annotation and evaluation choices (rare parts, fine-grained taxonomies, centroid
 computation, activation scope) change consistency and stability scores for identical models.
+We provide extended results, annotation policies and protocol details are in the
+[supplementary material](docs/supplement.pdf).
 
 ## Documentation index
 
@@ -15,12 +17,14 @@ computation, activation scope) change consistency and stability scores for ident
 |---|---|
 | Original ScaleProtoSeg: installation, data, training, evaluation, results | [README_original.md](README_original.md) |
 | Metrics (consistency, stability, imprecise activations) and part-annotation handling | [segmentation/analysis/README.md](segmentation/analysis/README.md) |
+| Supplementary material of the paper (extended results, annotation policies, protocol details) | [docs/supplement.pdf](docs/supplement.pdf) |
 | Measurement catalog: registering checkpoints, querying, web app, job submission | [segmentation/catalog/README.md](segmentation/catalog/README.md) |
 
 ## Paper contributions → documentation
 
 | Paper section | Where to look |
 |---|---|
+| Extended results and protocol details | [docs/supplement.pdf](docs/supplement.pdf) |
 | Replication and experimental protocol | [README_original.md](README_original.md) (setup, training, evaluation), [catalog README](segmentation/catalog/README.md) (registered checkpoints and measurements) |
 | Part-annotation considerations (incl. merging Pascal left/right parts) | [analysis README – Pascal left/right part merging](segmentation/analysis/README.md#pascal-leftright-part-merging) |
 | Support-aware consistency | [analysis README](segmentation/analysis/README.md#native-consistency-and-stability-measurements) |
